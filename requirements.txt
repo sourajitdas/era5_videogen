@@ -1,0 +1,12 @@
+# Install PyTorch first, matched to your CUDA version (https://pytorch.org).
+torch>=2.1
+einops
+h5py
+hydra-core
+matplotlib
+numpy
+omegaconf
+psutil
+pyyaml
+torchinfo
+tqdm

@@ -1,0 +1,10 @@
+_target_: era5_videogen.models.dit3d.DiT3D
+patch_size: [1, 1, 1]
+hidden_size: 1536
+depth: 12
+num_heads: 24
+mlp_ratio: 4.0
+timestep_frequency_embedding_size: 384
+timestep_max_period: 10000
+use_gradient_checkpointing: true
+logvar: false

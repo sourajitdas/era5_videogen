@@ -1,0 +1,4 @@
+_target_: era5_videogen.models.precond.PassPrecond
+sigma_min: 0
+sigma_max: 80
+sigma_data: 1

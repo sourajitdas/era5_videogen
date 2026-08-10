@@ -1,0 +1,59 @@
+# @package _global_
+#
+# Independent experiment: same surfcond AE latents + same DiT3D backbone as
+# ae_dit3d_trigflow_1x2x2_surfcond, but with EDM2/sCM ADAPTIVE (logvar) loss
+# weighting and a broader, higher-noise proposal (P_mean=0, P_std=1.5).
+#
+# Self-contained and isolated: a fresh experiment_name => its own
+# results/<name>/latest run + checkpoint dir. It does NOT touch the existing
+# runs, checkpoints, or sampling configs. The only shared code change is the new
+# `weighting: adaptive` branch in TrigFlowLoss (additive; existing `edm` runs are
+# byte-for-byte unaffected). `model.logvar: true` is set HERE only, not in the
+# shared model/dit3d.yaml, so other experiments keep logvar=false.
+defaults:
+  - /data: ae_latents
+  - /model: dit3d
+  - /loss: trigflow_adaptive
+  - /precond: pass
+
+optimizer:
+  lr: 0.0002
+
+data:
+  batch_size: 32
+  val_batch_size: 8
+  data_workers: 8
+
+model:
+  # Matches ae_dit3d_trigflow_1x2x2_surfcond, plus the logvar head the adaptive
+  # loss reads. logvar adds a single Linear(hidden, 1); negligible param cost.
+  patch_size: [1, 2, 2]
+  timestep_max_period: 10000
+  timestep_input_scale: 1000
+  use_gradient_checkpointing: true
+  hidden_size: 1536
+  depth: 12
+  num_heads: 24
+  mlp_ratio: 4.0
+  logvar: true
+
+loss:
+  noise_dist: lognormal
+  P_mean: 0.0
+  P_std: 1.5
+  weighting: adaptive
+
+trainer:
+  total_kimg: 50000
+  lr_rampup_kimg: 500
+  lr_min_factor: 0.05
+  kimg_per_tick: 5
+  checkpoint_ticks: 100
+  validation_ticks: 100
+  compile: true
+  conditional: false
+  checkpoint_dir: null
+  reset_lr: null
+  gradient_accumulation_steps: 1
+
+experiment_name: ae_dit3d_trigflow_adaptive

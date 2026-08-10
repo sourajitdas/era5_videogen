@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "era5-videogen"
+version = "1.0.0"
+description = "Multimodal spatiotemporal atmospheric data assimilation with latent flow matching"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "einops",
+    "h5py",
+    "hydra-core",
+    "matplotlib",
+    "numpy",
+    "omegaconf",
+    "psutil",
+    "pyyaml",
+    "torch>=2.1",
+    "torchinfo",
+    "tqdm",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["era5_videogen*", "ae*"]
+
+[tool.setuptools.package-data]
+era5_videogen = ["configs/**/*.yaml"]

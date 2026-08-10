@@ -1,0 +1,16 @@
+_target_: era5_videogen.training.loss.TrigFlowLoss
+sigma_data: 1.0
+noise_dist: lognormal
+sigma_min: 0.002
+sigma_max: 80.0
+# Sample t broadly (P_std 1.5) centred at sigma=1 (P_mean 0); the adaptive weight
+# rebalances levels, so the proposal mainly controls coverage rather than emphasis.
+P_mean: 0.0
+P_std: 1.5
+# Adaptive EDM2 / sCM uncertainty (logvar) weighting. The network predicts a
+# per-noise-level log-variance and the velocity MSE is normalised by exp(logvar)
+# (+ logvar penalty), pulling gradients off the irreducible low-noise floor.
+# REQUIRES the model to be built with logvar: true.
+# Refs: EDM2 (arXiv:2312.02696), sCM/TrigFlow (arXiv:2410.11081).
+weighting: adaptive
+snr_gamma: 5.0

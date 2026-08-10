@@ -1,0 +1,13 @@
+defaults:
+  - defaults
+
+dataset:
+  _target_: era5_videogen.data.ae_latents.ERA5AELatentDataset
+  root: data/latents
+  # Per-channel standardization using <root>/stats.yaml. Generate it once with
+  # scripts/compute_ae_latent_stats.py.
+  normalize: true
+  stats_path: null  # defaults to <root>/stats.yaml
+  latent_key: input/latent
+  source_root: data/era5
+  ae_model_path: null  # defaults to <root>/ae_model.pt when decoding

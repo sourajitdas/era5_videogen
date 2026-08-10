@@ -1,0 +1,16 @@
+defaults:
+  - _self_
+  - trainer: defaults
+  - optimizer: adamw
+  - experiment: era5_swin3d
+  - system: ampere
+
+seed: 1234
+resume: ""
+dry_run: false
+
+hydra:
+  run:
+    dir: results/${experiment_name}/${now:%Y%m%d_%H%M%S}
+  job:
+    chdir: true

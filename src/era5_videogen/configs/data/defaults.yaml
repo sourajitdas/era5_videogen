@@ -1,0 +1,6 @@
+# defaults to be overridden by specific experiments
+
+batch_size: 2048  # local batch size per GPU / process.
+data_workers: 8
+persistent_workers: true  # used only when data_workers > 0
+prefetch_factor: 2
