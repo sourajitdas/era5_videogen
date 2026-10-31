@@ -12,11 +12,13 @@ CONFIG=checkpoints/prior/config.yaml
 CKPT=checkpoints/prior/trigflow_adaptive_ema_019901.pt
 AE=checkpoints/autoencoder/ae_model.pt
 WINDOWS="${@:-93}"
+SEED="${SR_SEED:-17}"
+RUN_NAME="${SR_RUN_NAME:-E3c_lam0_seed${SEED}}"
 
 python -m era5_videogen.generate_posterior \
   --diffusion_config "$CONFIG" --diffusion_checkpoint "$CKPT" --ae_model_path "$AE" \
-  --output_dir outputs/sr --name E3c_lam0 \
-  --sample_index $WINDOWS --num_posterior_samples 1 --seed 17 \
+  --output_dir outputs/sr --name "${RUN_NAME}" \
+  --sample_index $WINDOWS --num_posterior_samples 1 --seed "${SEED}" \
   --obs_frames every:4 --obs_downscale 8 --obs_mode subsample \
   --guidance_scale 4.0 --gamma 1e-1 --meas_std 1e-2 \
   --num_steps 30 --corrector_steps 1 --corrector_snr 0.3 --corrector_max_sigma 5 \

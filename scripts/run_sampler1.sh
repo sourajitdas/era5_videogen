@@ -13,12 +13,18 @@
 set -euo pipefail
 
 module load conda
-conda activate era5_env
+conda activate "${CONDA_ENV_NAME:-era5_env}"
 
-REPO_DIR="/global/cfs/cdirs/m5021/sjdas/era5_videogen"
-WINDOW_INDEX="${1:-93}"
+REPO_DIR="${ERA5_VIDEOGEN_REPO_DIR:-/global/cfs/cdirs/m5021/sjdas/era5_videogen}"
+# The downloaded demo bundle has one local dataset element, index 0. The
+# original source-window index is retained inside that element's metadata.
+WINDOW_INDEX="${1:-0}"
 
 cd "${REPO_DIR}"
+
+# Fail with download/setup instructions before starting any expensive model
+# work. checkpoints/ and data/ are intentionally excluded from Git.
+bash scripts/check_demo_assets.sh
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 export PYTHONUNBUFFERED=1
@@ -42,4 +48,7 @@ print("GPU:", torch.cuda.get_device_name(0))'
 srun bash scripts/run_sr.sh "${WINDOW_INDEX}"
 
 echo "Sampling completed."
-echo "Output: ${REPO_DIR}/outputs/sr/E3c_lam0/sample_$(printf "%04d" "${WINDOW_INDEX}")"
+# echo "Output: ${REPO_DIR}/outputs/sr/E3c_lam0/sample_$(printf "%04d" "${WINDOW_INDEX}")"
+SEED="${SR_SEED:-17}"
+RUN_NAME="${SR_RUN_NAME:-E3c_lam0_seed${SEED}}"
+echo "Output: ${REPO_DIR}/outputs/sr/${RUN_NAME}/sample_$(printf "%04d" "${WINDOW_INDEX}")"

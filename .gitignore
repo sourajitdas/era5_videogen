@@ -11,7 +11,14 @@ slurm-*.out
 
 # Large files
 checkpoints/
+/checkpoints.zip
 data/era5/
 data/latents/
 data/obs/
 outputs/
+
+# Scheduler logs
+logs/
+*.out
+*.err
+

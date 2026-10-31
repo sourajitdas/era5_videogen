@@ -1,9 +1,0 @@
-Job ID: 60292020
-Host: nid001577
-Conda environment: /global/homes/s/sjdaspsu/.conda/envs/era5_env
-Python: /global/homes/s/sjdaspsu/.conda/envs/era5_env/bin/python
-Window index: 93
-PyTorch: 2.14.1+cu126
-CUDA available: True
-Visible GPUs: 1
-GPU: NVIDIA A100-SXM4-40GB
