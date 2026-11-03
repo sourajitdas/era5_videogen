@@ -16,8 +16,9 @@ module load conda
 conda activate "${CONDA_ENV_NAME:-era5_env}"
 
 REPO_DIR="${ERA5_VIDEOGEN_REPO_DIR:-/global/cfs/cdirs/m5021/sjdas/era5_videogen}"
-# The downloaded demo bundle has one local dataset element, index 0. The
-# original source-window index is retained inside that element's metadata.
+# WINDOW_INDEX is local to the active data/ bundle. For era5_main8_all8 the
+# valid indices are 0..7; the source-window identity is retained in each HDF5
+# filename and metadata.
 WINDOW_INDEX="${1:-0}"
 
 cd "${REPO_DIR}"

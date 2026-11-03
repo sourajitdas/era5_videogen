@@ -22,3 +22,13 @@ logs/
 *.out
 *.err
 
+# Local ERA5 datasets and active data symlink
+/data
+/era5_main8_*/
+
+# Scientific data files must never enter Git
+*.h5
+*.hdf5
+*.pkl
+*.npy
+*.npz
