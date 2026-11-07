@@ -538,11 +538,13 @@ class DenseFrameConditionOperator:
 
 
 class IGRAVideoConditioning:
-    """DPS/SDA-style guidance from sparse IGRA observations through the AE decoder.
+    """DPS/SDA-style sparse-observation and particle-repulsion guidance.
 
     Same structure as :class:`LatentVideoConditioning`, but the data misfit is
     the station-interpolated error of :class:`IGRAVideoOperator` (already a
-    mean over points/channels/frames, matching igra_gen's convention).
+    mean over points/channels/frames, matching igra_gen's convention).  The
+    optional repulsive score is evaluated in decoded standardized weather
+    space and, by default, only on source frames without observations.
     """
 
     def __init__(
@@ -565,6 +567,7 @@ class IGRAVideoConditioning:
         self.gamma = gamma
         self.grad_clip = grad_clip
         self.guide_norm = guide_norm
+        self.last_repulsion_stats = None
 
     def data_loss(self, x_0_hat, measurement):
         """Differentiable station misfit (for RED-diff / hard consistency)."""
@@ -572,7 +575,74 @@ class IGRAVideoConditioning:
         query_locations, true_values = measurement
         return self.operator.error_function(decoded, query_locations, true_values)
 
-    def conditioning(self, x_prev, x_t, x_0_hat, measurement, sigma, mu=1.0, **kwargs):
+    def _repulsion_objective(
+        self,
+        decoded,
+        bandwidth: float,
+        spatial_pool: int,
+        unobserved_only: bool,
+    ):
+        """Negative mean RBF similarity between decoded posterior particles."""
+        if decoded.shape[0] < 2:
+            raise ValueError("repulsion requires at least two particles")
+
+        features = decoded
+        observed = sorted(set(getattr(self.operator, "obs_frames", ())))
+        if unobserved_only and observed:
+            keep = torch.ones(
+                features.shape[2], dtype=torch.bool, device=features.device
+            )
+            keep[observed] = False
+            if not torch.any(keep):
+                raise ValueError("repulsion mask contains no unobserved source frames")
+            features = features[:, :, keep]
+
+        if spatial_pool > 1:
+            features = F.avg_pool3d(
+                features,
+                kernel_size=(1, spatial_pool, spatial_pool),
+                stride=(1, spatial_pool, spatial_pool),
+            )
+        flat = features.float().flatten(1)
+        pairwise_mse = torch.stack(
+            [
+                torch.mean((flat[left] - flat[right]) ** 2)
+                for left in range(flat.shape[0])
+                for right in range(left + 1, flat.shape[0])
+            ]
+        )
+        if bandwidth > 0:
+            bandwidth_used = pairwise_mse.new_tensor(float(bandwidth))
+        else:
+            bandwidth_used = torch.sqrt(
+                torch.median(pairwise_mse.detach()).clamp_min(1e-12)
+            )
+        kernels = torch.exp(
+            -pairwise_mse / (2.0 * bandwidth_used.square().clamp_min(1e-12))
+        )
+        objective = -kernels.mean()
+        stats = {
+            "pairwise_mse": float(pairwise_mse.detach().mean()),
+            "bandwidth": float(bandwidth_used.detach()),
+            "kernel": float(kernels.detach().mean()),
+        }
+        return objective, stats
+
+    def conditioning(
+        self,
+        x_prev,
+        x_t,
+        x_0_hat,
+        measurement,
+        sigma,
+        mu=1.0,
+        repulsion_strength: float = 0.0,
+        repulsion_bandwidth: float = 0.0,
+        repulsion_spatial_pool: int = 8,
+        repulsion_unobserved_only: bool = True,
+        repulsion_grad_norm: str = "rms",
+        **kwargs,
+    ):
         grad_input = x_prev if (x_prev is not None and x_prev.requires_grad) else x_0_hat
 
         decoded = self.decode_fn(x_0_hat)
@@ -581,6 +651,88 @@ class IGRAVideoConditioning:
         var = self.meas_std**2 + self.gamma * (sigma / mu) ** 2
         log_p = -(err / var) / 2
 
+        self.last_repulsion_stats = None
+        if repulsion_strength > 0:
+            if repulsion_spatial_pool < 1:
+                raise ValueError("repulsion_spatial_pool must be at least 1")
+            if repulsion_grad_norm not in {"none", "rms"}:
+                raise ValueError("repulsion_grad_norm must be 'none' or 'rms'")
+
+            err_value = err.item()
+            decoder_only = grad_input is x_0_hat
+            if decoder_only:
+                # Release the observation graph before rebuilding the decoder
+                # graph for the repulsive score.  This is the K=8/80-GB path.
+                data_grad = torch.autograd.grad(
+                    outputs=log_p,
+                    inputs=grad_input,
+                    retain_graph=False,
+                    create_graph=False,
+                )[0]
+                del decoded, err, log_p
+                decoded_repulsion = self.decode_fn(x_0_hat)
+                repulsion_objective, stats = self._repulsion_objective(
+                    decoded_repulsion,
+                    bandwidth=repulsion_bandwidth,
+                    spatial_pool=repulsion_spatial_pool,
+                    unobserved_only=repulsion_unobserved_only,
+                )
+                repulsion_grad = torch.autograd.grad(
+                    outputs=repulsion_objective,
+                    inputs=grad_input,
+                    retain_graph=False,
+                    create_graph=False,
+                )[0]
+            else:
+                # Full DPS shares the denoiser graph between the likelihood and
+                # repulsion terms.  This path is substantially more memory hungry.
+                repulsion_objective, stats = self._repulsion_objective(
+                    decoded,
+                    bandwidth=repulsion_bandwidth,
+                    spatial_pool=repulsion_spatial_pool,
+                    unobserved_only=repulsion_unobserved_only,
+                )
+                data_grad = torch.autograd.grad(
+                    outputs=log_p,
+                    inputs=grad_input,
+                    retain_graph=True,
+                    create_graph=False,
+                )[0]
+                repulsion_grad = torch.autograd.grad(
+                    outputs=repulsion_objective,
+                    inputs=grad_input,
+                    retain_graph=False,
+                    create_graph=False,
+                )[0]
+
+            if repulsion_grad_norm == "rms":
+                dims = tuple(range(1, repulsion_grad.ndim))
+                rms = torch.sqrt(
+                    torch.mean(repulsion_grad.square(), dim=dims, keepdim=True)
+                )
+                repulsion_grad = repulsion_grad / rms.clamp_min(1e-12)
+            if self.guide_norm == "dsg":
+                flat = data_grad.flatten(1)
+                norm = flat.norm(dim=1).clamp_min(1e-12).view(
+                    -1, *([1] * (data_grad.ndim - 1))
+                )
+                data_grad = data_grad / norm * (data_grad[0].numel() ** 0.5)
+            if self.grad_clip is not None:
+                data_grad = torch.clamp(
+                    data_grad, -self.grad_clip, self.grad_clip
+                )
+
+            scaled_score = (
+                self.scale * data_grad + repulsion_strength * repulsion_grad
+            ) * sigma
+            stats["strength"] = float(repulsion_strength)
+            stats["gradient_rms"] = float(
+                torch.sqrt(torch.mean(repulsion_grad.detach().square()))
+            )
+            self.last_repulsion_stats = stats
+            return scaled_score, err_value
+
+        # Preserve the independent sampler path when repulsion is disabled.
         grad = torch.autograd.grad(
             outputs=log_p, inputs=grad_input, retain_graph=False, create_graph=False
         )[0]

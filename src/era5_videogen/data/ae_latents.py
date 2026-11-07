@@ -257,14 +257,24 @@ class ERA5AELatentDataset(Dataset):
         from era5_videogen.data.ae_model import load_ae_decoder
 
         path = self._resolve_ae_model_path(ae_model_path)
-        return load_ae_decoder(path, device=device, source_root=self.source_root)
+        return load_ae_decoder(
+            path,
+            device=device,
+            source_root=self.source_root,
+            cond_split=self.split,
+        )
 
     def build_autoencoder(self, device: torch.device, ae_model_path: str | None = None):
         """Load the full AE (encoder + decoder), e.g. for posterior sampling."""
         from era5_videogen.data.ae_model import load_ae_model
 
         path = self._resolve_ae_model_path(ae_model_path)
-        return load_ae_model(path, device=device, source_root=self.source_root)
+        return load_ae_model(
+            path,
+            device=device,
+            source_root=self.source_root,
+            cond_split=self.split,
+        )
 
     def _resolve_ae_model_path(self, ae_model_path: str | None = None) -> str:
         path = ae_model_path or self.ae_model_path
