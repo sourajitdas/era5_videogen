@@ -662,13 +662,13 @@ class IGRAVideoConditioning:
             decoder_only = grad_input is x_0_hat
             if decoder_only:
                 # Release the observation graph before rebuilding the decoder
-                # graph for the repulsive score. This is the K=8/80-GB path.
+                # graph for the repulsive score.  This is the K=8/80-GB path.
                 data_grad = torch.autograd.grad(
                     outputs=log_p,
                     inputs=grad_input,
                     retain_graph=False,
                     create_graph=False,
-                )[0]sd
+                )[0]
                 del decoded, err, log_p
                 decoded_repulsion = self.decode_fn(x_0_hat)
                 repulsion_objective, stats = self._repulsion_objective(
@@ -685,7 +685,7 @@ class IGRAVideoConditioning:
                 )[0]
             else:
                 # Full DPS shares the denoiser graph between the likelihood and
-                # repulsion terms. This path is substantially more memory hungry.
+                # repulsion terms.  This path is substantially more memory hungry.
                 repulsion_objective, stats = self._repulsion_objective(
                     decoded,
                     bandwidth=repulsion_bandwidth,

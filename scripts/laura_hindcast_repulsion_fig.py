@@ -38,7 +38,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional raw/super-ob pickle used to draw sites at frame 16.",
     )
-    parser.add_argument("--plain-map", action="store_true")
+    parser.add_argument(
+        "--plain-map",
+        action="store_true",
+        help="Deprecated compatibility flag; the offline ERA5 land mask is always used.",
+    )
     return parser.parse_args()
 
 
@@ -173,6 +177,45 @@ def load_observation_locations(path: Path | None, index: int):
     return np.asarray(sorted(points), dtype=np.float32)
 
 
+def load_land_mask(bundle: Path, lat: np.ndarray, lon: np.ndarray):
+    """Load a static ERA5 land mask for offline map rendering on NERSC."""
+    import h5py
+
+    source_files = sorted((bundle / "data" / "source_root" / "test").glob("*.h5"))
+    if not source_files:
+        return None
+    with h5py.File(source_files[0], "r") as handle:
+        group = handle["input"] if "input" in handle else handle
+        for name in ("land_sea_mask", "land_mask", "lsm", "land_binary_mask"):
+            if name in group:
+                field = np.squeeze(np.asarray(group[name][...], dtype=np.float32))
+                break
+        else:
+            # Surface geopotential/orography is normally zero over the ocean.
+            for name in (
+                "geopotential_at_surface",
+                "surface_geopotential",
+                "orography",
+                "surface_altitude",
+            ):
+                if name in group:
+                    field = (
+                        np.abs(np.squeeze(np.asarray(group[name][...], dtype=np.float32)))
+                        > 1.0
+                    ).astype(np.float32)
+                    break
+            else:
+                return None
+    expected = (np.asarray(lat).squeeze().size, np.asarray(lon).squeeze().size)
+    if field.shape == expected[::-1]:
+        field = field.T
+    if field.shape != expected:
+        raise ValueError(
+            f"land mask has shape {field.shape}, expected {expected} from lat/lon"
+        )
+    return field
+
+
 def ensemble_metrics(tracks, truth_track, inferred, observed, landfall):
     def member_errors(frames):
         return [
@@ -223,32 +266,55 @@ def ensemble_metrics(tracks, truth_track, inferred, observed, landfall):
     }
 
 
+def single_track_metrics(track, truth_track, inferred, observed, landfall):
+    error = gc_km(
+        track["lat"], track["lon"], truth_track["lat"], truth_track["lon"]
+    )
+    return {
+        "track_error_km_inferred": float(error[inferred].mean()),
+        "track_error_km_observed": float(error[observed].mean()),
+        "landfall_error_km": float(error[landfall]),
+    }
+
+
 def relative(new, old):
     return float(new / max(old, 1e-12) - 1.0)
 
 
-def map_axes(plain):
-    if not plain:
-        try:
-            import cartopy.crs as ccrs
-            import cartopy.feature as cfeature
-
-            projection = ccrs.PlateCarree()
-            fig = plt.figure(figsize=(10.5, 6.6))
-            ax = fig.add_axes([0.04, 0.05, 0.92, 0.89], projection=projection)
-            ax.set_extent([-104, -54, 8, 40], crs=projection)
-            ax.add_feature(cfeature.LAND, facecolor="0.95", zorder=0)
-            ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
-            ax.add_feature(cfeature.BORDERS, linewidth=0.4, alpha=0.5)
-            return fig, ax, projection
-        except ImportError:
-            pass
+def map_axes(lat, lon, land_mask):
+    """Create an offline regional map using the ERA5 land-sea mask."""
     fig, ax = plt.subplots(figsize=(10.5, 6.6))
+    ax.set_facecolor("#edf5fa")
     ax.set_xlim(-104, -54)
     ax.set_ylim(8, 40)
     ax.set_xlabel("longitude")
     ax.set_ylabel("latitude")
-    return fig, ax, None
+    if land_mask is not None:
+        lat = np.asarray(lat).squeeze()
+        lon = np.asarray(lon).squeeze()
+        lon_plot = np.where(lon > 180.0, lon - 360.0, lon)
+        order = np.argsort(lon_plot)
+        lon_plot = lon_plot[order]
+        mask = np.asarray(land_mask)[:, order]
+        ax.contourf(
+            lon_plot,
+            lat,
+            mask,
+            levels=[0.5, max(1.01, float(np.nanmax(mask)) + 0.01)],
+            colors=["#e5e0d5"],
+            zorder=0,
+        )
+        ax.contour(
+            lon_plot,
+            lat,
+            mask,
+            levels=[0.5],
+            colors=["0.35"],
+            linewidths=0.65,
+            zorder=1,
+        )
+    ax.grid(color="0.75", linewidth=0.45, alpha=0.45)
+    return fig, ax
 
 
 def plot_tracks(
@@ -256,60 +322,62 @@ def plot_tracks(
     control,
     repulsion,
     truth,
-    mean_tracks,
+    control_mean_track,
     obs_points,
     times,
     tend,
-    plain,
     alpha,
+    lat,
+    lon,
+    land_mask,
 ):
-    fig, ax, projection = map_axes(plain)
-    transform = {"transform": projection} if projection is not None else {}
+    fig, ax = map_axes(lat, lon, land_mask)
     if obs_points is not None:
         ax.scatter(
             obs_points[:, 1], obs_points[:, 0], s=5, color="0.55", alpha=0.35,
-            zorder=1, label="in-situ super-ob sites (first observed frame)", **transform
+            zorder=2, label="in-situ super-ob sites (first observed frame)"
         )
     for index, track in enumerate(control):
         ax.plot(
             track["lon"][:tend] - 360, track["lat"][:tend], color="#377eb8",
-            linewidth=0.9, alpha=0.28, zorder=3,
+            linewidth=0.85, alpha=0.25, zorder=3,
             label="Independent-control members" if index == 0 else None,
-            **transform,
         )
     for index, track in enumerate(repulsion):
         ax.plot(
             track["lon"][:tend] - 360, track["lat"][:tend], color="#e6550d",
-            linewidth=0.9, alpha=0.32, zorder=4,
+            linewidth=1.15, alpha=0.55, zorder=4,
             label=(f"Joint-repulsion members (α={alpha:.2f})" if index == 0 else None),
-            **transform,
         )
-    for label, track, color in (
-        ("Independent-control ensemble mean", mean_tracks["control"], "#08519c"),
-        ("Joint-repulsion ensemble mean", mean_tracks["repulsion"], "#a63603"),
-    ):
-        ax.plot(
-            track["lon"][:tend] - 360, track["lat"][:tend], color=color,
-            linewidth=2.5, zorder=6, label=label, **transform
-        )
+    # Match the reference control definition: average the atmospheric fields
+    # first, then diagnose one trajectory from that ensemble-mean field.  No
+    # mean is shown for repulsion samples; their purpose here is tail/spread.
+    ax.plot(
+        control_mean_track["lon"][:tend] - 360,
+        control_mean_track["lat"][:tend],
+        color="#08519c",
+        linewidth=2.6,
+        zorder=6,
+        label="Independent-control ensemble-mean trajectory (K=8)",
+    )
     ax.plot(
         truth["lon"][:tend] - 360, truth["lat"][:tend], color="black",
-        linewidth=3.0, zorder=7, label="ERA5", **transform
+        linewidth=3.0, zorder=7, label="ERA5 reference"
     )
     for frame in range(0, tend, 4):
         x, y = truth["lon"][frame] - 360, truth["lat"][frame]
-        ax.scatter([x], [y], color="black", s=22, zorder=8, **transform)
+        ax.scatter([x], [y], color="black", s=22, zorder=8)
         ax.annotate(str(times[frame])[5:10], (x + 0.45, y - 1.1), fontsize=8)
     landfall = int((LANDFALL_TIME - START) / np.timedelta64(6, "h"))
     ax.scatter(
         [truth["lon"][landfall] - 360], [truth["lat"][landfall]], marker="*",
         s=330, color="gold", edgecolor="black", zorder=9,
-        label="landfall (Aug 27 06Z)", **transform
+        label="landfall (Aug 27 06Z)"
     )
     ax.scatter(
         [truth["lon"][OBS_FIRST] - 360], [truth["lat"][OBS_FIRST]], marker="s",
         s=65, facecolor="white", edgecolor="black", zorder=9,
-        label="first observed frame", **transform
+        label="first observed frame"
     )
     ax.legend(loc="upper left", fontsize=8.5, framealpha=0.95)
     ax.set_title(
@@ -419,10 +487,11 @@ def main() -> None:
     truth_track = tracker.track(truth, seed=seed, seed_frame=OBS_FIRST)
     control_tracks = [tracker.track(member, seed=seed, seed_frame=OBS_FIRST) for member in control]
     repulsion_tracks = [tracker.track(member, seed=seed, seed_frame=OBS_FIRST) for member in repulsion]
-    mean_tracks = {
-        "control": tracker.track(control.mean(0), seed=seed, seed_frame=OBS_FIRST),
-        "repulsion": tracker.track(repulsion.mean(0), seed=seed, seed_frame=OBS_FIRST),
-    }
+    # Reference/DJ definition: track the control ensemble-mean weather field,
+    # rather than averaging the already diagnosed member coordinates.
+    control_mean_track = tracker.track(
+        control.mean(axis=0), seed=seed, seed_frame=OBS_FIRST
+    )
 
     timesteps = truth.shape[1]
     times = START + np.arange(timesteps) * np.timedelta64(6, "h")
@@ -450,8 +519,15 @@ def main() -> None:
             "repulsion_schedule": metadata["repulsion_schedule"],
             "repulsion_unobserved_only": metadata["repulsion_unobserved_only"],
             "repulsion_guide_through_net": metadata["guide_through_net"],
+            "control_mean_definition": (
+                "cyclone track diagnosed from the K=8 ensemble-mean weather field"
+            ),
+            "repulsion_mean_displayed": False,
         },
         "control_k8": control_metrics,
+        "control_ensemble_mean_track": single_track_metrics(
+            control_mean_track, truth_track, inferred, observed, landfall
+        ),
         "repulsion_k8": repulsion_metrics,
         "relative_change": {
             "inferred_track_error": relative(repulsion_metrics["track_error_km_inferred_mean"], control_metrics["track_error_km_inferred_mean"]),
@@ -469,17 +545,20 @@ def main() -> None:
         candidate = bundle / "data" / "observations" / "global_joint_2020_year_superob.pkl"
         obs_path = candidate if candidate.exists() else None
     obs_points = load_observation_locations(obs_path, args.source_index + OBS_FIRST)
+    land_mask = load_land_mask(bundle, lat, lon)
     plot_tracks(
         args.output_dir / "laura_track_comparison.png",
         control_tracks,
         repulsion_tracks,
         truth_track,
-        mean_tracks,
+        control_mean_track,
         obs_points,
         times,
         tend,
-        args.plain_map,
         alpha,
+        lat,
+        lon,
+        land_mask,
     )
     plot_track_error(
         args.output_dir / "laura_track_error.png",
