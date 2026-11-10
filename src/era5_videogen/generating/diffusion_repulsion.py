@@ -285,6 +285,7 @@ class PosteriorDiffusionSampler:
         repulsion_unobserved_only=True,
         repulsion_mask_mode=None,
         repulsion_observation_buffer=0,
+        repulsion_split_beta=1.0,
         repulsion_grad_norm="rms",
         randn_like=torch.randn_like,
     ):
@@ -325,8 +326,11 @@ class PosteriorDiffusionSampler:
           sparse-video SR this is restricted to unobserved source frames by
           default. ``repulsion_mask_mode='spatial'`` instead excludes only the
           observed variable/grid-cell footprints, retaining repulsion over the
-          unmeasured portion of every frame.  The frozen prior and observation
-          likelihood are unchanged.
+          unmeasured portion of every frame. ``repulsion_mask_mode='split'``
+          preserves the forecast-frame objective and adds an independently
+          normalized observed-frame-complement objective weighted by
+          ``repulsion_split_beta``. The frozen prior and observation likelihood
+          are unchanged.
         """
         if num_steps < 2:
             raise ValueError("TrigFlow DPM sampling requires num_steps >= 2")
@@ -350,12 +354,15 @@ class PosteriorDiffusionSampler:
             raise ValueError("repulsion_schedule must be 'constant' or 'sine'")
         if repulsion_spatial_pool < 1:
             raise ValueError("repulsion_spatial_pool must be at least 1")
-        if repulsion_mask_mode not in {None, "frames", "spatial", "all"}:
+        if repulsion_mask_mode not in {None, "frames", "spatial", "split", "all"}:
             raise ValueError(
-                "repulsion_mask_mode must be None, 'frames', 'spatial', or 'all'"
+                "repulsion_mask_mode must be None, 'frames', 'spatial', "
+                "'split', or 'all'"
             )
         if repulsion_observation_buffer < 0:
             raise ValueError("repulsion_observation_buffer must be non-negative")
+        if repulsion_split_beta < 0:
+            raise ValueError("repulsion_split_beta must be non-negative")
 
         device = latents.device
         dtype = torch.float32
@@ -455,6 +462,7 @@ class PosteriorDiffusionSampler:
                         repulsion_unobserved_only=repulsion_unobserved_only,
                         repulsion_mask_mode=repulsion_mask_mode,
                         repulsion_observation_buffer=repulsion_observation_buffer,
+                        repulsion_split_beta=repulsion_split_beta,
                         repulsion_grad_norm=repulsion_grad_norm,
                     )
                 likelihood_score = likelihood_score.detach()
@@ -532,7 +540,15 @@ class PosteriorDiffusionSampler:
                         f"  bandwidth {repulsion_stats['bandwidth']:.4g}"
                         f"  mask {repulsion_stats['mask_mode']}"
                         f"  active {repulsion_stats['active_fraction']:.4f}"
+                        f"  beta {repulsion_stats['split_beta']:.3g}"
                     )
+                    if repulsion_stats["mask_mode"] == "split":
+                        extra += (
+                            f"  forecast_mse "
+                            f"{repulsion_stats['forecast_pairwise_mse']:.4g}"
+                            f"  observed_mse "
+                            f"{repulsion_stats['observed_pairwise_mse']:.4g}"
+                        )
                 print(f"step {step_idx:3d}  sigma {sigma_s.item():9.4f}  meas_err {err:.6f}{extra}")
 
             x_t = x_next

@@ -113,12 +113,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repulsion_all_frames", action="store_true")
     parser.add_argument(
         "--repulsion_mask_mode",
-        choices=["frames", "spatial", "all"],
+        choices=["frames", "spatial", "split", "all"],
         default="frames",
         help=(
             "Where decoded-space repulsion acts: 'frames' keeps the original "
             "unobserved-frame-only behavior; 'spatial' also acts on unobserved "
-            "pixels and variables inside observed frames; 'all' uses every pixel."
+            "pixels and variables inside observed frames; 'split' adds separate "
+            "forecast-frame and observed-frame-complement objectives; 'all' uses "
+            "every pixel."
+        ),
+    )
+    parser.add_argument(
+        "--repulsion_split_beta",
+        type=float,
+        default=1.0,
+        help=(
+            "Weight beta on the independently normalized unobserved-pixel "
+            "objective when --repulsion_mask_mode=split."
         ),
     )
     parser.add_argument(
@@ -127,7 +138,7 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help=(
             "Additional decoded-grid cells excluded around each bilinear station "
-            "footprint when --repulsion_mask_mode=spatial."
+            "footprint when --repulsion_mask_mode is spatial or split."
         ),
     )
     parser.add_argument(
@@ -150,6 +161,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--repulsion_spatial_pool must be at least 1")
     if args.repulsion_observation_buffer < 0:
         parser.error("--repulsion_observation_buffer must be non-negative")
+    if args.repulsion_split_beta < 0:
+        parser.error("--repulsion_split_beta must be non-negative")
     if args.repulsion_all_frames:
         if args.repulsion_mask_mode != "frames":
             parser.error(
@@ -276,6 +289,7 @@ def main() -> None:
             repulsion_unobserved_only=args.repulsion_mask_mode == "frames",
             repulsion_mask_mode=args.repulsion_mask_mode,
             repulsion_observation_buffer=args.repulsion_observation_buffer,
+            repulsion_split_beta=args.repulsion_split_beta,
             repulsion_grad_norm=args.repulsion_grad_norm,
         )
         x0 = sampler.pos_trigflow_sampler(
@@ -384,6 +398,7 @@ def main() -> None:
         "repulsion_unobserved_only": args.repulsion_mask_mode == "frames",
         "repulsion_mask_mode": args.repulsion_mask_mode,
         "repulsion_observation_buffer": args.repulsion_observation_buffer,
+        "repulsion_split_beta": args.repulsion_split_beta,
         "repulsion_grad_norm": args.repulsion_grad_norm,
         "checkpoint": args.diffusion_checkpoint,
         "config": args.diffusion_config,

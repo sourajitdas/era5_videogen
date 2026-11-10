@@ -273,6 +273,7 @@ def main() -> None:
     guidance_modes = set()
     repulsion_mask_modes = set()
     repulsion_observation_buffers = set()
+    repulsion_split_betas = set()
     for days, run in runs.items():
         samples = members_view(run["sample_path"])
         particle_counts[days] = int(samples.shape[0])
@@ -293,6 +294,9 @@ def main() -> None:
         repulsion_observation_buffers.add(
             int(run["metadata"].get("repulsion_observation_buffer", 0))
         )
+        repulsion_split_betas.add(
+            float(run["metadata"].get("repulsion_split_beta", 1.0))
+        )
     if len(alphas) != 1:
         raise ValueError(f"runs use different repulsion strengths: {sorted(alphas)}")
     alpha = alphas.pop()
@@ -307,6 +311,11 @@ def main() -> None:
             f"{sorted(repulsion_observation_buffers)}"
         )
     observation_buffer = repulsion_observation_buffers.pop()
+    if len(repulsion_split_betas) != 1:
+        raise ValueError(
+            f"runs use different split beta values: {sorted(repulsion_split_betas)}"
+        )
+    split_beta = repulsion_split_betas.pop()
 
     obs_path = args.observations_pkl
     if obs_path is None:
@@ -356,7 +365,8 @@ def main() -> None:
     ax.legend(loc="upper right", fontsize=8.2, framealpha=0.95)
     ax.set_title(
         "Hurricane Laura forecasts with repulsion-guided posterior sampling "
-        f"(alpha={alpha:.2f}, mask={mask_mode})"
+        f"(alpha={alpha:.2f}, mask={mask_mode}"
+        + (f", beta={split_beta:g})" if mask_mode == "split" else ")")
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     track_outputs = save_figure(fig, args.output_dir, "figure17_repulsion_tracks")
@@ -420,6 +430,7 @@ def main() -> None:
         "repulsion_strength": alpha,
         "repulsion_mask_mode": mask_mode,
         "repulsion_observation_buffer": observation_buffer,
+        "repulsion_split_beta": split_beta,
         "guidance_modes": sorted(guidance_modes),
         "runs": {
             str(days): {

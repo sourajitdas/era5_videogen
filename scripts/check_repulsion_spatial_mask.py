@@ -56,9 +56,42 @@ def main() -> None:
         measurement=measurement,
     )
     assert spatial_stats["pairwise_mse"] > 0
+
+    # The split objective must preserve the forecast-frame term and add a
+    # separately normalized observed-frame-complement term with weight beta.
+    split_input = decoded.clone()
+    split_input[1, 1, 1, 0, 5] = 1.0  # forecast-frame difference
+    split_input[1, 1, 0, 0, 5] = 1.0  # unobserved pixel in observed frame
+    frame_objective, _ = conditioning._repulsion_objective(
+        split_input,
+        bandwidth=1.0,
+        spatial_pool=1,
+        mask_mode="frames",
+        measurement=measurement,
+    )
+    split_zero_objective, _ = conditioning._repulsion_objective(
+        split_input,
+        bandwidth=1.0,
+        spatial_pool=1,
+        mask_mode="split",
+        measurement=measurement,
+        split_beta=0.0,
+    )
+    split_objective, split_stats = conditioning._repulsion_objective(
+        split_input,
+        bandwidth=1.0,
+        spatial_pool=1,
+        mask_mode="split",
+        measurement=measurement,
+        split_beta=1.0,
+    )
+    assert torch.allclose(frame_objective, split_zero_objective)
+    assert split_objective < split_zero_objective
+    assert split_stats["forecast_pairwise_mse"] > 0
+    assert split_stats["observed_pairwise_mse"] > 0
     print(
-        "PASS: observed bilinear footprints are excluded, while unobserved "
-        "pixels/variables/frames remain active for repulsion."
+        "PASS: observed bilinear footprints are excluded and split repulsion "
+        "keeps separately normalized forecast/complement objectives."
     )
 
 

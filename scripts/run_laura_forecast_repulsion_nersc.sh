@@ -49,6 +49,7 @@ REPULSION_MAX_SIGMA="${REPULSION_MAX_SIGMA:-5.0}"
 REPULSION_SPATIAL_POOL="${REPULSION_SPATIAL_POOL:-8}"
 REPULSION_MASK_MODE="${REPULSION_MASK_MODE:-frames}"
 REPULSION_OBSERVATION_BUFFER="${REPULSION_OBSERVATION_BUFFER:-0}"
+REPULSION_SPLIT_BETA="${REPULSION_SPLIT_BETA:-1.0}"
 NO_NET_GRAD="${NO_NET_GRAD:-1}"
 FORCE="${FORCE:-0}"
 VERIFY_MODEL_HASHES="${VERIFY_MODEL_HASHES:-0}"
@@ -58,8 +59,8 @@ OBS_LAST=$((OBS_COUNT - 1))
 OBS_FRAMES="0-${OBS_LAST}"
 STRENGTH_TAG="${REPULSION_STRENGTH//./p}"
 case "${REPULSION_MASK_MODE}" in
-  frames|spatial|all) ;;
-  *) echo "REPULSION_MASK_MODE must be frames, spatial, or all" >&2; exit 2 ;;
+  frames|spatial|split|all) ;;
+  *) echo "REPULSION_MASK_MODE must be frames, spatial, split, or all" >&2; exit 2 ;;
 esac
 if (( REPULSION_OBSERVATION_BUFFER < 0 )); then
   echo "REPULSION_OBSERVATION_BUFFER must be non-negative" >&2
@@ -68,6 +69,10 @@ fi
 MASK_TAG=""
 if [[ "${REPULSION_MASK_MODE}" != "frames" ]]; then
   MASK_TAG="_mask${REPULSION_MASK_MODE}_buf${REPULSION_OBSERVATION_BUFFER}"
+fi
+if [[ "${REPULSION_MASK_MODE}" == "split" ]]; then
+  BETA_TAG="${REPULSION_SPLIT_BETA//./p}"
+  MASK_TAG="${MASK_TAG}_beta${BETA_TAG}"
 fi
 
 CKPT="${BUNDLE}/models/dj_checkpoint-019901.pt"
@@ -96,6 +101,7 @@ echo "Joint particle count:  ${K}"
 echo "Repulsion strength:    ${REPULSION_STRENGTH}"
 echo "Repulsion sigma band:  ${REPULSION_MIN_SIGMA}..${REPULSION_MAX_SIGMA}"
 echo "Repulsion mask:        ${REPULSION_MASK_MODE} (buffer ${REPULSION_OBSERVATION_BUFFER})"
+echo "Split objective beta:  ${REPULSION_SPLIT_BETA}"
 echo "Decoder-only guidance: ${NO_NET_GRAD}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
@@ -129,6 +135,7 @@ SAMPLER_ARGS=(
   --repulsion_spatial_pool "${REPULSION_SPATIAL_POOL}"
   --repulsion_mask_mode "${REPULSION_MASK_MODE}"
   --repulsion_observation_buffer "${REPULSION_OBSERVATION_BUFFER}"
+  --repulsion_split_beta "${REPULSION_SPLIT_BETA}"
   --log_every 2
 )
 if (( NO_NET_GRAD == 1 )); then

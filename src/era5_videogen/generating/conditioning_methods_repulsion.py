@@ -663,45 +663,16 @@ class IGRAVideoConditioning:
         self._repulsion_mask_cache[cache_key] = mask
         return mask
 
-    def _repulsion_objective(
+    def _rbf_repulsion_component(
         self,
-        decoded,
+        features,
         bandwidth: float,
         spatial_pool: int,
-        mask_mode: str,
-        measurement=None,
-        observation_buffer: int = 0,
+        weights=None,
     ):
-        """Negative mean RBF similarity between decoded posterior particles."""
-        if decoded.shape[0] < 2:
-            raise ValueError("repulsion requires at least two particles")
-        if mask_mode not in {"frames", "spatial", "all"}:
-            raise ValueError("repulsion_mask_mode must be 'frames', 'spatial', or 'all'")
-
-        features = decoded
-        weights = None
-        active_fraction = 1.0
-        observed = sorted(set(getattr(self.operator, "obs_frames", ())))
-        if mask_mode == "frames" and observed:
-            keep = torch.ones(
-                features.shape[2], dtype=torch.bool, device=features.device
-            )
-            keep[observed] = False
-            if not torch.any(keep):
-                raise ValueError("repulsion mask contains no unobserved source frames")
-            features = features[:, :, keep]
-            active_fraction = float(keep.float().mean())
-        elif mask_mode == "spatial":
-            if measurement is None:
-                raise ValueError("spatial repulsion masking requires the observations")
-            query_locations, _ = measurement
-            weights = self._observation_complement_mask(
-                decoded,
-                query_locations=query_locations,
-                observation_buffer=observation_buffer,
-            )
-            active_fraction = float(weights.mean().detach())
-
+        """Return one independently normalized negative-RBF component."""
+        if weights is not None and not torch.any(weights > 0):
+            raise ValueError("repulsion component mask is empty")
         if spatial_pool > 1:
             pool_kwargs = {
                 "kernel_size": (1, spatial_pool, spatial_pool),
@@ -738,15 +709,151 @@ class IGRAVideoConditioning:
             -pairwise_mse / (2.0 * bandwidth_used.square().clamp_min(1e-12))
         )
         objective = -kernels.mean()
-        stats = {
+        return objective, {
             "pairwise_mse": float(pairwise_mse.detach().mean()),
             "bandwidth": float(bandwidth_used.detach()),
             "kernel": float(kernels.detach().mean()),
-            "mask_mode": mask_mode,
-            "active_fraction": active_fraction,
-            "observation_buffer": int(observation_buffer),
+            "active_fraction": (
+                1.0 if weights is None else float(weights.mean().detach())
+            ),
         }
-        return objective, stats
+
+    def _repulsion_objective(
+        self,
+        decoded,
+        bandwidth: float,
+        spatial_pool: int,
+        mask_mode: str,
+        measurement=None,
+        observation_buffer: int = 0,
+        split_beta: float = 1.0,
+    ):
+        """Negative RBF similarity between decoded posterior particles.
+
+        ``split`` keeps the original forecast-frame objective and adds a second,
+        independently normalized objective over the unobserved pixels and
+        variables of observed frames::
+
+            R = R_forecast + split_beta * R_observed_complement
+
+        This prevents the sparse observed-frame contribution from being diluted
+        by one pooled full-video objective.
+        """
+        if decoded.shape[0] < 2:
+            raise ValueError("repulsion requires at least two particles")
+        if mask_mode not in {"frames", "spatial", "split", "all"}:
+            raise ValueError(
+                "repulsion_mask_mode must be 'frames', 'spatial', 'split', or 'all'"
+            )
+        if split_beta < 0:
+            raise ValueError("repulsion_split_beta must be non-negative")
+
+        observed = sorted(set(getattr(self.operator, "obs_frames", ())))
+        observed = [frame for frame in observed if 0 <= frame < decoded.shape[2]]
+        keep_forecast = torch.ones(
+            decoded.shape[2], dtype=torch.bool, device=decoded.device
+        )
+        if observed:
+            keep_forecast[observed] = False
+
+        if mask_mode in {"frames", "split"}:
+            if not torch.any(keep_forecast):
+                raise ValueError("repulsion mask contains no forecast source frames")
+            forecast_objective, forecast_stats = self._rbf_repulsion_component(
+                decoded[:, :, keep_forecast],
+                bandwidth=bandwidth,
+                spatial_pool=spatial_pool,
+            )
+            forecast_stats["active_fraction"] = float(keep_forecast.float().mean())
+            if mask_mode == "frames":
+                return forecast_objective, {
+                    **forecast_stats,
+                    "mask_mode": mask_mode,
+                    "observation_buffer": int(observation_buffer),
+                    "split_beta": 0.0,
+                }
+
+        if mask_mode in {"spatial", "split"}:
+            if measurement is None:
+                raise ValueError(
+                    f"{mask_mode} repulsion masking requires the observations"
+                )
+            query_locations, _ = measurement
+            complement_weights = self._observation_complement_mask(
+                decoded,
+                query_locations=query_locations,
+                observation_buffer=observation_buffer,
+            )
+            if mask_mode == "spatial":
+                objective, stats = self._rbf_repulsion_component(
+                    decoded,
+                    bandwidth=bandwidth,
+                    spatial_pool=spatial_pool,
+                    weights=complement_weights,
+                )
+                return objective, {
+                    **stats,
+                    "mask_mode": mask_mode,
+                    "observation_buffer": int(observation_buffer),
+                    "split_beta": 0.0,
+                }
+
+            if not observed:
+                raise ValueError("split repulsion requires at least one observed frame")
+            observed_selector = torch.zeros(
+                decoded.shape[2], device=decoded.device, dtype=torch.float32
+            )
+            observed_selector[observed] = 1.0
+            observed_weights = complement_weights * observed_selector.view(
+                1, 1, -1, 1, 1
+            )
+            observed_objective, observed_stats = self._rbf_repulsion_component(
+                decoded,
+                bandwidth=bandwidth,
+                spatial_pool=spatial_pool,
+                weights=observed_weights,
+            )
+            objective = forecast_objective + split_beta * observed_objective
+            normalizer = 1.0 + split_beta
+            stats = {
+                "pairwise_mse": (
+                    forecast_stats["pairwise_mse"]
+                    + split_beta * observed_stats["pairwise_mse"]
+                ) / normalizer,
+                "bandwidth": (
+                    forecast_stats["bandwidth"]
+                    + split_beta * observed_stats["bandwidth"]
+                ) / normalizer,
+                "kernel": (
+                    forecast_stats["kernel"]
+                    + split_beta * observed_stats["kernel"]
+                ) / normalizer,
+                "mask_mode": mask_mode,
+                "active_fraction": observed_stats["active_fraction"],
+                "forecast_pairwise_mse": forecast_stats["pairwise_mse"],
+                "observed_pairwise_mse": observed_stats["pairwise_mse"],
+                "forecast_bandwidth": forecast_stats["bandwidth"],
+                "observed_bandwidth": observed_stats["bandwidth"],
+                "forecast_kernel": forecast_stats["kernel"],
+                "observed_kernel": observed_stats["kernel"],
+                "forecast_active_fraction": forecast_stats["active_fraction"],
+                "observed_active_fraction": observed_stats["active_fraction"],
+                "split_beta": float(split_beta),
+                "observation_buffer": int(observation_buffer),
+            }
+            return objective, stats
+
+        objective, stats = self._rbf_repulsion_component(
+            decoded,
+            bandwidth=bandwidth,
+            spatial_pool=spatial_pool,
+        )
+        return objective, {
+            **stats,
+            "mask_mode": mask_mode,
+            "observation_buffer": int(observation_buffer),
+            "split_beta": 0.0,
+        }
 
     def conditioning(
         self,
@@ -762,6 +869,7 @@ class IGRAVideoConditioning:
         repulsion_unobserved_only: bool = True,
         repulsion_mask_mode: str | None = None,
         repulsion_observation_buffer: int = 0,
+        repulsion_split_beta: float = 1.0,
         repulsion_grad_norm: str = "rms",
         **kwargs,
     ):
@@ -803,6 +911,7 @@ class IGRAVideoConditioning:
                     mask_mode=mask_mode,
                     measurement=measurement,
                     observation_buffer=repulsion_observation_buffer,
+                    split_beta=repulsion_split_beta,
                 )
                 repulsion_grad = torch.autograd.grad(
                     outputs=repulsion_objective,
@@ -820,6 +929,7 @@ class IGRAVideoConditioning:
                     mask_mode=mask_mode,
                     measurement=measurement,
                     observation_buffer=repulsion_observation_buffer,
+                    split_beta=repulsion_split_beta,
                 )
                 data_grad = torch.autograd.grad(
                     outputs=log_p,

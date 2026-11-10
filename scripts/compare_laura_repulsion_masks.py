@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare frame-only and spatial-complement Laura repulsion forecasts."""
+"""Compare frame-only and spatial/split-mask Laura repulsion forecasts."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--frame-run", type=Path, required=True)
-    parser.add_argument("--spatial-run", type=Path, required=True)
+    parser.add_argument("--candidate-run", type=Path, required=True)
     parser.add_argument("--obs-days", type=int, choices=[2, 3, 4], default=4)
     parser.add_argument("--source-index", type=int, default=SOURCE_INDEX)
     parser.add_argument("--observations-pkl", type=Path, default=None)
@@ -52,21 +52,22 @@ def main() -> None:
     args = parse_args()
     runs = {
         "frame": load_run(args.frame_run, args.obs_days, args.source_index),
-        "spatial": load_run(args.spatial_run, args.obs_days, args.source_index),
+        "candidate": load_run(args.candidate_run, args.obs_days, args.source_index),
     }
     frame_mode = runs["frame"]["metadata"].get("repulsion_mask_mode", "frames")
-    spatial_mode = runs["spatial"]["metadata"].get(
+    candidate_mode = runs["candidate"]["metadata"].get(
         "repulsion_mask_mode", "frames"
     )
     if frame_mode != "frames":
         raise ValueError(f"frame baseline declares repulsion_mask_mode={frame_mode!r}")
-    if spatial_mode != "spatial":
+    if candidate_mode not in {"spatial", "split"}:
         raise ValueError(
-            f"spatial candidate declares repulsion_mask_mode={spatial_mode!r}"
+            "candidate must use spatial or split repulsion; "
+            f"received repulsion_mask_mode={candidate_mode!r}"
         )
 
     variables = list(runs["frame"]["metadata"]["variables"])
-    if list(runs["spatial"]["metadata"]["variables"]) != variables:
+    if list(runs["candidate"]["metadata"]["variables"]) != variables:
         raise ValueError("mask runs do not share the same variable order")
     required = [
         "mean_sea_level_pressure",
@@ -88,9 +89,9 @@ def main() -> None:
         variables.index("10m_v_component_of_wind"),
     )
     truth = field_view(runs["frame"]["truth_path"])
-    spatial_truth = field_view(runs["spatial"]["truth_path"])
-    if not np.allclose(truth, spatial_truth, equal_nan=True):
-        raise ValueError("frame and spatial runs do not share identical ERA5 truth")
+    candidate_truth = field_view(runs["candidate"]["truth_path"])
+    if not np.allclose(truth, candidate_truth, equal_nan=True):
+        raise ValueError("baseline and candidate runs do not share identical ERA5 truth")
 
     initial_truth_track = tracker.track(truth)
     seed = (initial_truth_track["lat"][0], initial_truth_track["lon"][0])
@@ -139,9 +140,14 @@ def main() -> None:
         )
     styles = {
         "frame": ("#377eb8", "Frame-only repulsion mask"),
-        "spatial": ("#e41a1c", "Spatial observation-complement mask"),
+        "candidate": (
+            "#e41a1c",
+            "Split repulsion objective"
+            if candidate_mode == "split"
+            else "Spatial observation-complement mask",
+        ),
     }
-    for label in ("frame", "spatial"):
+    for label in ("frame", "candidate"):
         color, legend = styles[label]
         for index, track in enumerate(tracks[label]):
             ax.plot(
@@ -187,20 +193,24 @@ def main() -> None:
         "source_index": args.source_index,
         "observed_days": args.obs_days,
         "frame_run": str(runs["frame"]["path"]),
-        "spatial_run": str(runs["spatial"]["path"]),
+        "candidate_run": str(runs["candidate"]["path"]),
+        "candidate_mask_mode": candidate_mode,
+        "candidate_split_beta": float(
+            runs["candidate"]["metadata"].get("repulsion_split_beta", 1.0)
+        ),
         "frame_metrics": metrics["frame"],
-        "spatial_metrics": metrics["spatial"],
-        "spatial_vs_frame_percent": {
+        "candidate_metrics": metrics["candidate"],
+        "candidate_vs_frame_percent": {
             "mean_track_error": relative_change(
-                metrics["spatial"]["track_error_km_mean"],
+                metrics["candidate"]["track_error_km_mean"],
                 metrics["frame"]["track_error_km_mean"],
             ),
             "mean_landfall_error": relative_change(
-                metrics["spatial"]["landfall_error_km_mean"],
+                metrics["candidate"]["landfall_error_km_mean"],
                 metrics["frame"]["landfall_error_km_mean"],
             ),
             "mean_pairwise_track_distance": relative_change(
-                metrics["spatial"]["pairwise_track_distance_km_mean"],
+                metrics["candidate"]["pairwise_track_distance_km_mean"],
                 metrics["frame"]["pairwise_track_distance_km_mean"],
             ),
         },
