@@ -568,6 +568,7 @@ class IGRAVideoConditioning:
         self.grad_clip = grad_clip
         self.guide_norm = guide_norm
         self.last_repulsion_stats = None
+        self._repulsion_mask_cache = {}
 
     def data_loss(self, x_0_hat, measurement):
         """Differentiable station misfit (for RED-diff / hard consistency)."""
@@ -575,20 +576,113 @@ class IGRAVideoConditioning:
         query_locations, true_values = measurement
         return self.operator.error_function(decoded, query_locations, true_values)
 
+    def _observation_complement_mask(
+        self,
+        decoded,
+        query_locations,
+        observation_buffer: int,
+    ):
+        """Return a channel/time/space mask that is zero at observed pixels.
+
+        IGRA values are sampled with bilinear interpolation after rolling the
+        ERA5 longitude axis by half a globe.  Each station therefore depends on
+        at most four decoded grid cells.  Those cells, plus an optional grid-cell
+        buffer, are excluded only for the observed variable and time.  Every
+        other variable, pixel, and frame remains eligible for repulsion.
+        """
+        if observation_buffer < 0:
+            raise ValueError("repulsion_observation_buffer must be non-negative")
+
+        _, channels, timesteps, height, width = decoded.shape
+        cache_key = (
+            id(query_locations), channels, timesteps, height, width,
+            str(decoded.device), int(observation_buffer),
+        )
+        cached = self._repulsion_mask_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        mask = torch.ones(
+            (1, channels, timesteps, height, width),
+            device=decoded.device,
+            dtype=torch.float32,
+        )
+        for frame_position, source_frame in enumerate(self.operator.obs_frames):
+            if frame_position >= len(query_locations):
+                break
+            if source_frame < 0 or source_frame >= timesteps:
+                continue
+            locations_by_variable = query_locations[frame_position]
+            for measurement_channel, locations in enumerate(locations_by_variable):
+                points = np.asarray(locations, dtype=np.float32)
+                if points.size == 0:
+                    continue
+                points = points.reshape(-1, 2)
+                video_channel = (
+                    measurement_channel
+                    if self.operator.channel_map is None
+                    else self.operator.channel_map[measurement_channel]
+                )
+                if video_channel < 0 or video_channel >= channels:
+                    continue
+
+                latitude = torch.as_tensor(
+                    points[:, 0], device=decoded.device, dtype=torch.float32
+                ).clamp(-90.0, 90.0)
+                longitude = torch.as_tensor(
+                    points[:, 1], device=decoded.device, dtype=torch.float32
+                ).clamp(-180.0, 180.0)
+                # Match IGRAVideoOperator.H: normalized [-180, 180] longitude
+                # on the half-globe-rolled field with align_corners=True.
+                row = (latitude + 90.0) / 180.0 * (height - 1)
+                col_rolled = (longitude + 180.0) / 360.0 * (width - 1)
+                row_candidates = (torch.floor(row).long(), torch.ceil(row).long())
+                col_candidates = (
+                    torch.floor(col_rolled).long(), torch.ceil(col_rolled).long()
+                )
+
+                for base_row in row_candidates:
+                    for base_col_rolled in col_candidates:
+                        base_col = torch.remainder(base_col_rolled - width // 2, width)
+                        for delta_row in range(-observation_buffer, observation_buffer + 1):
+                            marked_row = (base_row + delta_row).clamp(0, height - 1)
+                            for delta_col in range(
+                                -observation_buffer, observation_buffer + 1
+                            ):
+                                marked_col = torch.remainder(base_col + delta_col, width)
+                                mask[
+                                    0,
+                                    video_channel,
+                                    source_frame,
+                                    marked_row,
+                                    marked_col,
+                                ] = 0.0
+
+        if not torch.any(mask > 0):
+            raise ValueError("observation-complement repulsion mask is empty")
+        self._repulsion_mask_cache[cache_key] = mask
+        return mask
+
     def _repulsion_objective(
         self,
         decoded,
         bandwidth: float,
         spatial_pool: int,
-        unobserved_only: bool,
+        mask_mode: str,
+        measurement=None,
+        observation_buffer: int = 0,
     ):
         """Negative mean RBF similarity between decoded posterior particles."""
         if decoded.shape[0] < 2:
             raise ValueError("repulsion requires at least two particles")
+        if mask_mode not in {"frames", "spatial", "all"}:
+            raise ValueError("repulsion_mask_mode must be 'frames', 'spatial', or 'all'")
 
         features = decoded
+        weights = None
+        active_fraction = 1.0
         observed = sorted(set(getattr(self.operator, "obs_frames", ())))
-        if unobserved_only and observed:
+        if mask_mode == "frames" and observed:
             keep = torch.ones(
                 features.shape[2], dtype=torch.bool, device=features.device
             )
@@ -596,21 +690,44 @@ class IGRAVideoConditioning:
             if not torch.any(keep):
                 raise ValueError("repulsion mask contains no unobserved source frames")
             features = features[:, :, keep]
+            active_fraction = float(keep.float().mean())
+        elif mask_mode == "spatial":
+            if measurement is None:
+                raise ValueError("spatial repulsion masking requires the observations")
+            query_locations, _ = measurement
+            weights = self._observation_complement_mask(
+                decoded,
+                query_locations=query_locations,
+                observation_buffer=observation_buffer,
+            )
+            active_fraction = float(weights.mean().detach())
 
         if spatial_pool > 1:
-            features = F.avg_pool3d(
-                features,
-                kernel_size=(1, spatial_pool, spatial_pool),
-                stride=(1, spatial_pool, spatial_pool),
-            )
+            pool_kwargs = {
+                "kernel_size": (1, spatial_pool, spatial_pool),
+                "stride": (1, spatial_pool, spatial_pool),
+            }
+            if weights is None:
+                features = F.avg_pool3d(features, **pool_kwargs)
+            else:
+                pooled_weights = F.avg_pool3d(weights, **pool_kwargs)
+                features = F.avg_pool3d(features * weights, **pool_kwargs)
+                features = features / pooled_weights.clamp_min(1e-12)
+                weights = pooled_weights
         flat = features.float().flatten(1)
-        pairwise_mse = torch.stack(
-            [
-                torch.mean((flat[left] - flat[right]) ** 2)
-                for left in range(flat.shape[0])
-                for right in range(left + 1, flat.shape[0])
-            ]
-        )
+        flat_weights = None if weights is None else weights.float().flatten()
+        distances = []
+        for left in range(flat.shape[0]):
+            for right in range(left + 1, flat.shape[0]):
+                squared_difference = (flat[left] - flat[right]) ** 2
+                if flat_weights is None:
+                    distances.append(torch.mean(squared_difference))
+                else:
+                    distances.append(
+                        torch.sum(squared_difference * flat_weights)
+                        / flat_weights.sum().clamp_min(1e-12)
+                    )
+        pairwise_mse = torch.stack(distances)
         if bandwidth > 0:
             bandwidth_used = pairwise_mse.new_tensor(float(bandwidth))
         else:
@@ -625,6 +742,9 @@ class IGRAVideoConditioning:
             "pairwise_mse": float(pairwise_mse.detach().mean()),
             "bandwidth": float(bandwidth_used.detach()),
             "kernel": float(kernels.detach().mean()),
+            "mask_mode": mask_mode,
+            "active_fraction": active_fraction,
+            "observation_buffer": int(observation_buffer),
         }
         return objective, stats
 
@@ -640,6 +760,8 @@ class IGRAVideoConditioning:
         repulsion_bandwidth: float = 0.0,
         repulsion_spatial_pool: int = 8,
         repulsion_unobserved_only: bool = True,
+        repulsion_mask_mode: str | None = None,
+        repulsion_observation_buffer: int = 0,
         repulsion_grad_norm: str = "rms",
         **kwargs,
     ):
@@ -657,6 +779,9 @@ class IGRAVideoConditioning:
                 raise ValueError("repulsion_spatial_pool must be at least 1")
             if repulsion_grad_norm not in {"none", "rms"}:
                 raise ValueError("repulsion_grad_norm must be 'none' or 'rms'")
+            mask_mode = repulsion_mask_mode
+            if mask_mode is None:
+                mask_mode = "frames" if repulsion_unobserved_only else "all"
 
             err_value = err.item()
             decoder_only = grad_input is x_0_hat
@@ -675,7 +800,9 @@ class IGRAVideoConditioning:
                     decoded_repulsion,
                     bandwidth=repulsion_bandwidth,
                     spatial_pool=repulsion_spatial_pool,
-                    unobserved_only=repulsion_unobserved_only,
+                    mask_mode=mask_mode,
+                    measurement=measurement,
+                    observation_buffer=repulsion_observation_buffer,
                 )
                 repulsion_grad = torch.autograd.grad(
                     outputs=repulsion_objective,
@@ -690,7 +817,9 @@ class IGRAVideoConditioning:
                     decoded,
                     bandwidth=repulsion_bandwidth,
                     spatial_pool=repulsion_spatial_pool,
-                    unobserved_only=repulsion_unobserved_only,
+                    mask_mode=mask_mode,
+                    measurement=measurement,
+                    observation_buffer=repulsion_observation_buffer,
                 )
                 data_grad = torch.autograd.grad(
                     outputs=log_p,

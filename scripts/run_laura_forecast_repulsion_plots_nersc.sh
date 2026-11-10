@@ -20,9 +20,15 @@ REPO_DIR="${ERA5_VIDEOGEN_REPO_DIR:-/global/cfs/cdirs/m5021/sjdas/era5_videogen}
 BUNDLE="${LAURA_FORECAST_BUNDLE:-${REPO_DIR}/data/hurricane_laura/laura_w941_forecast_bundle_v1}"
 K="${K:-8}"
 REPULSION_STRENGTH="${REPULSION_STRENGTH:-0.10}"
+REPULSION_MASK_MODE="${REPULSION_MASK_MODE:-frames}"
+REPULSION_OBSERVATION_BUFFER="${REPULSION_OBSERVATION_BUFFER:-0}"
 STRENGTH_TAG="${REPULSION_STRENGTH//./p}"
+MASK_TAG=""
+if [[ "${REPULSION_MASK_MODE}" != "frames" ]]; then
+  MASK_TAG="_mask${REPULSION_MASK_MODE}_buf${REPULSION_OBSERVATION_BUFFER}"
+fi
 RUN_ROOT="${REPO_DIR}/outputs/hurricane_laura/forecast_repulsion"
-OUTPUT_DIR="${RUN_ROOT}/figures_k${K}_alpha${STRENGTH_TAG}"
+OUTPUT_DIR="${RUN_ROOT}/figures_k${K}_alpha${STRENGTH_TAG}${MASK_TAG}"
 
 cd "${REPO_DIR}"
 export PYTHONPATH="${REPO_DIR}/src:${PYTHONPATH:-}"
@@ -35,7 +41,7 @@ unset SLURM_MEM_PER_CPU SLURM_MEM_PER_GPU SLURM_MEM_PER_NODE
 
 run_dir() {
   local days="$1"
-  echo "${RUN_ROOT}/laura_w941_forecast_obs${days}d_repulsion_k${K}_alpha${STRENGTH_TAG}"
+  echo "${RUN_ROOT}/laura_w941_forecast_obs${days}d_repulsion_k${K}_alpha${STRENGTH_TAG}${MASK_TAG}"
 }
 
 for days in 2 3 4; do

@@ -47,6 +47,8 @@ REPULSION_STRENGTH="${REPULSION_STRENGTH:-0.10}"
 REPULSION_MIN_SIGMA="${REPULSION_MIN_SIGMA:-0.05}"
 REPULSION_MAX_SIGMA="${REPULSION_MAX_SIGMA:-5.0}"
 REPULSION_SPATIAL_POOL="${REPULSION_SPATIAL_POOL:-8}"
+REPULSION_MASK_MODE="${REPULSION_MASK_MODE:-frames}"
+REPULSION_OBSERVATION_BUFFER="${REPULSION_OBSERVATION_BUFFER:-0}"
 NO_NET_GRAD="${NO_NET_GRAD:-1}"
 FORCE="${FORCE:-0}"
 VERIFY_MODEL_HASHES="${VERIFY_MODEL_HASHES:-0}"
@@ -55,12 +57,24 @@ OBS_COUNT=$((OBS_DAYS * 4))
 OBS_LAST=$((OBS_COUNT - 1))
 OBS_FRAMES="0-${OBS_LAST}"
 STRENGTH_TAG="${REPULSION_STRENGTH//./p}"
+case "${REPULSION_MASK_MODE}" in
+  frames|spatial|all) ;;
+  *) echo "REPULSION_MASK_MODE must be frames, spatial, or all" >&2; exit 2 ;;
+esac
+if (( REPULSION_OBSERVATION_BUFFER < 0 )); then
+  echo "REPULSION_OBSERVATION_BUFFER must be non-negative" >&2
+  exit 2
+fi
+MASK_TAG=""
+if [[ "${REPULSION_MASK_MODE}" != "frames" ]]; then
+  MASK_TAG="_mask${REPULSION_MASK_MODE}_buf${REPULSION_OBSERVATION_BUFFER}"
+fi
 
 CKPT="${BUNDLE}/models/dj_checkpoint-019901.pt"
 AE="${REPO_DIR}/checkpoints/autoencoder/ae_model.pt"
 OBS="${BUNDLE}/data/observations/global_joint_2020_year_superob.pkl"
 OUTPUT_ROOT="${REPO_DIR}/outputs/hurricane_laura/forecast_repulsion"
-RUN_NAME="laura_w941_forecast_obs${OBS_DAYS}d_repulsion_k${K}_alpha${STRENGTH_TAG}"
+RUN_NAME="laura_w941_forecast_obs${OBS_DAYS}d_repulsion_k${K}_alpha${STRENGTH_TAG}${MASK_TAG}"
 RUN_DIR="${OUTPUT_ROOT}/${RUN_NAME}"
 RUNTIME_CONFIG="${RUN_DIR}/runtime_config.yaml"
 mkdir -p "${RUN_DIR}"
@@ -81,6 +95,7 @@ echo "Observed days/frames:  ${OBS_DAYS} / ${OBS_FRAMES}"
 echo "Joint particle count:  ${K}"
 echo "Repulsion strength:    ${REPULSION_STRENGTH}"
 echo "Repulsion sigma band:  ${REPULSION_MIN_SIGMA}..${REPULSION_MAX_SIGMA}"
+echo "Repulsion mask:        ${REPULSION_MASK_MODE} (buffer ${REPULSION_OBSERVATION_BUFFER})"
 echo "Decoder-only guidance: ${NO_NET_GRAD}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
@@ -112,6 +127,8 @@ SAMPLER_ARGS=(
   --repulsion_max_sigma "${REPULSION_MAX_SIGMA}"
   --repulsion_schedule sine
   --repulsion_spatial_pool "${REPULSION_SPATIAL_POOL}"
+  --repulsion_mask_mode "${REPULSION_MASK_MODE}"
+  --repulsion_observation_buffer "${REPULSION_OBSERVATION_BUFFER}"
   --log_every 2
 )
 if (( NO_NET_GRAD == 1 )); then

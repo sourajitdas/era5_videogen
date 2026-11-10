@@ -271,6 +271,8 @@ def main() -> None:
     particle_counts = {}
     alphas = set()
     guidance_modes = set()
+    repulsion_mask_modes = set()
+    repulsion_observation_buffers = set()
     for days, run in runs.items():
         samples = members_view(run["sample_path"])
         particle_counts[days] = int(samples.shape[0])
@@ -285,9 +287,26 @@ def main() -> None:
         guidance_modes.add(
             "full-DPS" if run["metadata"].get("guide_through_net") else "decoder-only"
         )
+        repulsion_mask_modes.add(
+            run["metadata"].get("repulsion_mask_mode", "frames")
+        )
+        repulsion_observation_buffers.add(
+            int(run["metadata"].get("repulsion_observation_buffer", 0))
+        )
     if len(alphas) != 1:
         raise ValueError(f"runs use different repulsion strengths: {sorted(alphas)}")
     alpha = alphas.pop()
+    if len(repulsion_mask_modes) != 1:
+        raise ValueError(
+            f"runs use different repulsion masks: {sorted(repulsion_mask_modes)}"
+        )
+    mask_mode = repulsion_mask_modes.pop()
+    if len(repulsion_observation_buffers) != 1:
+        raise ValueError(
+            "runs use different repulsion observation buffers: "
+            f"{sorted(repulsion_observation_buffers)}"
+        )
+    observation_buffer = repulsion_observation_buffers.pop()
 
     obs_path = args.observations_pkl
     if obs_path is None:
@@ -337,7 +356,7 @@ def main() -> None:
     ax.legend(loc="upper right", fontsize=8.2, framealpha=0.95)
     ax.set_title(
         "Hurricane Laura forecasts with repulsion-guided posterior sampling "
-        f"(alpha={alpha:.2f})"
+        f"(alpha={alpha:.2f}, mask={mask_mode})"
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     track_outputs = save_figure(fig, args.output_dir, "figure17_repulsion_tracks")
@@ -399,6 +418,8 @@ def main() -> None:
         "window_start": str(START),
         "landfall_time": str(LANDFALL_TIME),
         "repulsion_strength": alpha,
+        "repulsion_mask_mode": mask_mode,
+        "repulsion_observation_buffer": observation_buffer,
         "guidance_modes": sorted(guidance_modes),
         "runs": {
             str(days): {

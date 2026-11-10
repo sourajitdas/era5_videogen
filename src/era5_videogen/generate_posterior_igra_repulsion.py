@@ -112,6 +112,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repulsion_spatial_pool", type=int, default=8)
     parser.add_argument("--repulsion_all_frames", action="store_true")
     parser.add_argument(
+        "--repulsion_mask_mode",
+        choices=["frames", "spatial", "all"],
+        default="frames",
+        help=(
+            "Where decoded-space repulsion acts: 'frames' keeps the original "
+            "unobserved-frame-only behavior; 'spatial' also acts on unobserved "
+            "pixels and variables inside observed frames; 'all' uses every pixel."
+        ),
+    )
+    parser.add_argument(
+        "--repulsion_observation_buffer",
+        type=int,
+        default=0,
+        help=(
+            "Additional decoded-grid cells excluded around each bilinear station "
+            "footprint when --repulsion_mask_mode=spatial."
+        ),
+    )
+    parser.add_argument(
         "--repulsion_grad_norm", choices=["none", "rms"], default="rms"
     )
     parser.add_argument("--log_every", type=int, default=2)
@@ -129,6 +148,15 @@ def parse_args() -> argparse.Namespace:
         parser.error("expected 0 < --repulsion_min_sigma < --repulsion_max_sigma")
     if args.repulsion_spatial_pool < 1:
         parser.error("--repulsion_spatial_pool must be at least 1")
+    if args.repulsion_observation_buffer < 0:
+        parser.error("--repulsion_observation_buffer must be non-negative")
+    if args.repulsion_all_frames:
+        if args.repulsion_mask_mode != "frames":
+            parser.error(
+                "--repulsion_all_frames cannot be combined with an explicit "
+                "--repulsion_mask_mode"
+            )
+        args.repulsion_mask_mode = "all"
     return args
 
 
@@ -245,7 +273,9 @@ def main() -> None:
             repulsion_max_sigma=args.repulsion_max_sigma,
             repulsion_schedule=args.repulsion_schedule,
             repulsion_spatial_pool=args.repulsion_spatial_pool,
-            repulsion_unobserved_only=not args.repulsion_all_frames,
+            repulsion_unobserved_only=args.repulsion_mask_mode == "frames",
+            repulsion_mask_mode=args.repulsion_mask_mode,
+            repulsion_observation_buffer=args.repulsion_observation_buffer,
             repulsion_grad_norm=args.repulsion_grad_norm,
         )
         x0 = sampler.pos_trigflow_sampler(
@@ -349,7 +379,11 @@ def main() -> None:
         "repulsion_max_sigma": args.repulsion_max_sigma,
         "repulsion_schedule": args.repulsion_schedule,
         "repulsion_spatial_pool": args.repulsion_spatial_pool,
-        "repulsion_unobserved_only": not args.repulsion_all_frames,
+        # Legacy field retained for older analysis scripts.  The explicit mask
+        # mode below is authoritative for new runs.
+        "repulsion_unobserved_only": args.repulsion_mask_mode == "frames",
+        "repulsion_mask_mode": args.repulsion_mask_mode,
+        "repulsion_observation_buffer": args.repulsion_observation_buffer,
         "repulsion_grad_norm": args.repulsion_grad_norm,
         "checkpoint": args.diffusion_checkpoint,
         "config": args.diffusion_config,
