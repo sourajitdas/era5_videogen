@@ -21,23 +21,29 @@ BUNDLE="${LAURA_FORECAST_BUNDLE:-${REPO_DIR}/data/hurricane_laura/laura_w941_for
 OBS_DAYS="${OBS_DAYS:-4}"
 K="${K:-8}"
 REPULSION_STRENGTH="${REPULSION_STRENGTH:-0.10}"
+FRAME_REPULSION_STRENGTH="${FRAME_REPULSION_STRENGTH:-${REPULSION_STRENGTH}}"
 REPULSION_MASK_MODE="${REPULSION_MASK_MODE:-split}"
 REPULSION_OBSERVATION_BUFFER="${REPULSION_OBSERVATION_BUFFER:-0}"
 REPULSION_SPLIT_BETA="${REPULSION_SPLIT_BETA:-1.0}"
+HURRICANE_DESCRIPTOR_HORIZON="${HURRICANE_DESCRIPTOR_HORIZON:-9}"
 STRENGTH_TAG="${REPULSION_STRENGTH//./p}"
+FRAME_STRENGTH_TAG="${FRAME_REPULSION_STRENGTH//./p}"
 case "${REPULSION_MASK_MODE}" in
-  spatial|split) ;;
-  *) echo "comparison candidate must use spatial or split mask mode" >&2; exit 2 ;;
+  spatial|split|hurricane) ;;
+  *) echo "comparison candidate must use spatial, split, or hurricane mode" >&2; exit 2 ;;
 esac
 MASK_TAG="_mask${REPULSION_MASK_MODE}_buf${REPULSION_OBSERVATION_BUFFER}"
 if [[ "${REPULSION_MASK_MODE}" == "split" ]]; then
   BETA_TAG="${REPULSION_SPLIT_BETA//./p}"
   MASK_TAG="${MASK_TAG}_beta${BETA_TAG}"
 fi
+if [[ "${REPULSION_MASK_MODE}" == "hurricane" ]]; then
+  MASK_TAG="_hurricane_h${HURRICANE_DESCRIPTOR_HORIZON}"
+fi
 RUN_ROOT="${REPO_DIR}/outputs/hurricane_laura/forecast_repulsion"
-FRAME_RUN="${RUN_ROOT}/laura_w941_forecast_obs${OBS_DAYS}d_repulsion_k${K}_alpha${STRENGTH_TAG}"
+FRAME_RUN="${RUN_ROOT}/laura_w941_forecast_obs${OBS_DAYS}d_repulsion_k${K}_alpha${FRAME_STRENGTH_TAG}"
 CANDIDATE_RUN="${RUN_ROOT}/laura_w941_forecast_obs${OBS_DAYS}d_repulsion_k${K}_alpha${STRENGTH_TAG}${MASK_TAG}"
-OUTPUT_DIR="${RUN_ROOT}/mask_comparison_obs${OBS_DAYS}d_k${K}_alpha${STRENGTH_TAG}${MASK_TAG}"
+OUTPUT_DIR="${RUN_ROOT}/mask_comparison_obs${OBS_DAYS}d_k${K}_framealpha${FRAME_STRENGTH_TAG}_candidatealpha${STRENGTH_TAG}${MASK_TAG}"
 
 case "${OBS_DAYS}" in
   2|3|4) ;;

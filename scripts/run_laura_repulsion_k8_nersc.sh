@@ -43,6 +43,11 @@ REPULSION_SPATIAL_POOL="${REPULSION_SPATIAL_POOL:-8}"
 REPULSION_MASK_MODE="${REPULSION_MASK_MODE:-frames}"
 REPULSION_OBSERVATION_BUFFER="${REPULSION_OBSERVATION_BUFFER:-0}"
 REPULSION_SPLIT_BETA="${REPULSION_SPLIT_BETA:-1.0}"
+HURRICANE_DESCRIPTOR_HORIZON="${HURRICANE_DESCRIPTOR_HORIZON:-0}"
+HURRICANE_REGION_LAT_MIN="${HURRICANE_REGION_LAT_MIN:-15}"
+HURRICANE_REGION_LAT_MAX="${HURRICANE_REGION_LAT_MAX:-35}"
+HURRICANE_REGION_LON_MIN="${HURRICANE_REGION_LON_MIN:--100}"
+HURRICANE_REGION_LON_MAX="${HURRICANE_REGION_LON_MAX:--65}"
 NO_NET_GRAD="${NO_NET_GRAD:-1}"
 FORCE="${FORCE:-0}"
 VERIFY_MODEL_HASHES="${VERIFY_MODEL_HASHES:-0}"
@@ -66,8 +71,8 @@ OBS="${BUNDLE}/data/observations/global_joint_2020_year_superob.pkl"
 OUTPUT_ROOT="${REPO_DIR}/outputs/hurricane_laura"
 STRENGTH_TAG="${REPULSION_STRENGTH//./p}"
 case "${REPULSION_MASK_MODE}" in
-  frames|spatial|split|all) ;;
-  *) echo "REPULSION_MASK_MODE must be frames, spatial, split, or all" >&2; exit 2 ;;
+  frames|spatial|split|hurricane|all) ;;
+  *) echo "REPULSION_MASK_MODE must be frames, spatial, split, hurricane, or all" >&2; exit 2 ;;
 esac
 if (( REPULSION_OBSERVATION_BUFFER < 0 )); then
   echo "REPULSION_OBSERVATION_BUFFER must be non-negative" >&2
@@ -80,6 +85,9 @@ fi
 if [[ "${REPULSION_MASK_MODE}" == "split" ]]; then
   BETA_TAG="${REPULSION_SPLIT_BETA//./p}"
   MASK_TAG="${MASK_TAG}_beta${BETA_TAG}"
+fi
+if [[ "${REPULSION_MASK_MODE}" == "hurricane" ]]; then
+  MASK_TAG="_hurricane_h${HURRICANE_DESCRIPTOR_HORIZON}"
 fi
 RUN_NAME="laura_w932_last16_repulsion_${RUN_KIND}_alpha${STRENGTH_TAG}${MASK_TAG}"
 RUN_DIR="${OUTPUT_ROOT}/${RUN_NAME}"
@@ -106,6 +114,7 @@ echo "Repulsion strength:    ${REPULSION_STRENGTH}"
 echo "Repulsion sigma band:  ${REPULSION_MIN_SIGMA}..${REPULSION_MAX_SIGMA}"
 echo "Repulsion mask:        ${REPULSION_MASK_MODE} (buffer ${REPULSION_OBSERVATION_BUFFER})"
 echo "Split objective beta:  ${REPULSION_SPLIT_BETA}"
+echo "Hurricane descriptor:  horizon ${HURRICANE_DESCRIPTOR_HORIZON}; lat ${HURRICANE_REGION_LAT_MIN}..${HURRICANE_REGION_LAT_MAX}; lon ${HURRICANE_REGION_LON_MIN}..${HURRICANE_REGION_LON_MAX}"
 echo "Decoder-only guidance: ${NO_NET_GRAD}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
@@ -140,6 +149,9 @@ SAMPLER_ARGS=(
   --repulsion_mask_mode "${REPULSION_MASK_MODE}"
   --repulsion_observation_buffer "${REPULSION_OBSERVATION_BUFFER}"
   --repulsion_split_beta "${REPULSION_SPLIT_BETA}"
+  --hurricane_descriptor_horizon "${HURRICANE_DESCRIPTOR_HORIZON}"
+  --hurricane_region_lat "${HURRICANE_REGION_LAT_MIN}" "${HURRICANE_REGION_LAT_MAX}"
+  --hurricane_region_lon "${HURRICANE_REGION_LON_MIN}" "${HURRICANE_REGION_LON_MAX}"
   --log_every 2
 )
 if (( NO_NET_GRAD == 1 )); then

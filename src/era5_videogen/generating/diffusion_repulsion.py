@@ -329,8 +329,10 @@ class PosteriorDiffusionSampler:
           unmeasured portion of every frame. ``repulsion_mask_mode='split'``
           preserves the forecast-frame objective and adds an independently
           normalized observed-frame-complement objective weighted by
-          ``repulsion_split_beta``. The frozen prior and observation likelihood
-          are unchanged.
+          ``repulsion_split_beta``. ``repulsion_mask_mode='hurricane'`` applies
+          the RBF objective directly to differentiable storm center, pressure,
+          and wind descriptors. The frozen prior and observation likelihood are
+          unchanged.
         """
         if num_steps < 2:
             raise ValueError("TrigFlow DPM sampling requires num_steps >= 2")
@@ -354,10 +356,12 @@ class PosteriorDiffusionSampler:
             raise ValueError("repulsion_schedule must be 'constant' or 'sine'")
         if repulsion_spatial_pool < 1:
             raise ValueError("repulsion_spatial_pool must be at least 1")
-        if repulsion_mask_mode not in {None, "frames", "spatial", "split", "all"}:
+        if repulsion_mask_mode not in {
+            None, "frames", "spatial", "split", "hurricane", "all"
+        }:
             raise ValueError(
                 "repulsion_mask_mode must be None, 'frames', 'spatial', "
-                "'split', or 'all'"
+                "'split', 'hurricane', or 'all'"
             )
         if repulsion_observation_buffer < 0:
             raise ValueError("repulsion_observation_buffer must be non-negative")
@@ -548,6 +552,15 @@ class PosteriorDiffusionSampler:
                             f"{repulsion_stats['forecast_pairwise_mse']:.4g}"
                             f"  observed_mse "
                             f"{repulsion_stats['observed_pairwise_mse']:.4g}"
+                        )
+                    elif repulsion_stats["mask_mode"] == "hurricane":
+                        extra += (
+                            f"  track_km "
+                            f"{repulsion_stats['descriptor_track_distance_km']:.3g}"
+                            f"  pressure_hpa "
+                            f"{repulsion_stats['descriptor_pressure_difference_hpa']:.3g}"
+                            f"  wind_ms "
+                            f"{repulsion_stats['descriptor_wind_difference_ms']:.3g}"
                         )
                 print(f"step {step_idx:3d}  sigma {sigma_s.item():9.4f}  meas_err {err:.6f}{extra}")
 

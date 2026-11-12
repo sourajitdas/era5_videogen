@@ -60,9 +60,9 @@ def main() -> None:
     )
     if frame_mode != "frames":
         raise ValueError(f"frame baseline declares repulsion_mask_mode={frame_mode!r}")
-    if candidate_mode not in {"spatial", "split"}:
+    if candidate_mode not in {"spatial", "split", "hurricane"}:
         raise ValueError(
-            "candidate must use spatial or split repulsion; "
+            "candidate must use spatial, split, or hurricane repulsion; "
             f"received repulsion_mask_mode={candidate_mode!r}"
         )
 
@@ -142,9 +142,11 @@ def main() -> None:
         "frame": ("#377eb8", "Frame-only repulsion mask"),
         "candidate": (
             "#e41a1c",
-            "Split repulsion objective"
-            if candidate_mode == "split"
-            else "Spatial observation-complement mask",
+            {
+                "split": "Split repulsion objective",
+                "spatial": "Spatial observation-complement mask",
+                "hurricane": "Hurricane-descriptor repulsion",
+            }[candidate_mode],
         ),
     }
     for label in ("frame", "candidate"):

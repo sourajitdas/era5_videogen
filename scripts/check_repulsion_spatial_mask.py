@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small CPU check for the sparse-observation repulsion mask."""
+"""Small CPU checks for spatial, split, and hurricane repulsion objectives."""
 
 from __future__ import annotations
 
@@ -89,9 +89,55 @@ def main() -> None:
     assert split_objective < split_zero_objective
     assert split_stats["forecast_pairwise_mse"] > 0
     assert split_stats["observed_pairwise_mse"] > 0
+
+    hurricane_config = {
+        "latitude": np.linspace(-90.0, 90.0, 8, dtype=np.float32),
+        "longitude": np.arange(16, dtype=np.float32) * 22.5,
+        "region_lat": [-20.0, 50.0],
+        "region_lon": [-110.0, -20.0],
+        "horizon": 1,
+        "mslp_channel": 0,
+        "u10_channel": 1,
+        "v10_channel": 2,
+        "weather_means": [100000.0, 0.0, 0.0],
+        "weather_stds": [1000.0, 10.0, 10.0],
+        "pressure_temperature_hpa": 2.0,
+        "wind_temperature_ms": 2.0,
+        "track_radius_deg": 30.0,
+        "position_scale_deg": 2.0,
+        "pressure_scale_hpa": 10.0,
+        "wind_scale_ms": 5.0,
+    }
+    hurricane_conditioning = IGRAVideoConditioning(
+        operator,
+        decode_fn=lambda value: value,
+        hurricane_descriptor_config=hurricane_config,
+    )
+    hurricane_input = torch.zeros(
+        (2, 3, 2, 8, 16), dtype=torch.float32, requires_grad=True
+    )
+    with torch.no_grad():
+        hurricane_input[0, 0, 1, 4, 12] = -3.0
+        hurricane_input[1, 0, 1, 5, 14] = -3.0
+        hurricane_input[0, 1, 1, 4, 12] = 2.0
+        hurricane_input[1, 2, 1, 5, 14] = 2.0
+    hurricane_objective, hurricane_stats = (
+        hurricane_conditioning._repulsion_objective(
+            hurricane_input,
+            bandwidth=1.0,
+            spatial_pool=1,
+            mask_mode="hurricane",
+            measurement=measurement,
+        )
+    )
+    hurricane_gradient = torch.autograd.grad(
+        hurricane_objective, hurricane_input
+    )[0]
+    assert hurricane_stats["descriptor_track_distance_km"] > 0
+    assert torch.isfinite(hurricane_gradient).all()
+    assert hurricane_gradient.abs().sum() > 0
     print(
-        "PASS: observed bilinear footprints are excluded and split repulsion "
-        "keeps separately normalized forecast/complement objectives."
+        "PASS: spatial, split, and hurricane-descriptor repulsion checks passed."
     )
 
 

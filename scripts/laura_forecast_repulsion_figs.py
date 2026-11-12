@@ -365,7 +365,7 @@ def main() -> None:
     ax.legend(loc="upper right", fontsize=8.2, framealpha=0.95)
     ax.set_title(
         "Hurricane Laura forecasts with repulsion-guided posterior sampling "
-        f"(alpha={alpha:.2f}, mask={mask_mode}"
+        f"(alpha={alpha:g}, mask={mask_mode}"
         + (f", beta={split_beta:g})" if mask_mode == "split" else ")")
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)

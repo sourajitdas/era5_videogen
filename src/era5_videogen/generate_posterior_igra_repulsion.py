@@ -113,14 +113,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repulsion_all_frames", action="store_true")
     parser.add_argument(
         "--repulsion_mask_mode",
-        choices=["frames", "spatial", "split", "all"],
+        choices=["frames", "spatial", "split", "hurricane", "all"],
         default="frames",
         help=(
             "Where decoded-space repulsion acts: 'frames' keeps the original "
             "unobserved-frame-only behavior; 'spatial' also acts on unobserved "
             "pixels and variables inside observed frames; 'split' adds separate "
             "forecast-frame and observed-frame-complement objectives; 'all' uses "
-            "every pixel."
+            "every pixel; 'hurricane' repels differentiable storm-track and "
+            "intensity descriptors over forecast frames."
         ),
     )
     parser.add_argument(
@@ -144,6 +145,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repulsion_grad_norm", choices=["none", "rms"], default="rms"
     )
+    parser.add_argument("--hurricane_region_lat", type=float, nargs=2, default=[15.0, 35.0])
+    parser.add_argument("--hurricane_region_lon", type=float, nargs=2, default=[-100.0, -65.0])
+    parser.add_argument(
+        "--hurricane_descriptor_horizon",
+        type=int,
+        default=0,
+        help="Number of earliest forecast frames in the descriptor; 0 uses all.",
+    )
+    parser.add_argument("--hurricane_pressure_temperature_hpa", type=float, default=2.0)
+    parser.add_argument("--hurricane_wind_temperature_ms", type=float, default=2.0)
+    parser.add_argument("--hurricane_track_radius_deg", type=float, default=6.0)
+    parser.add_argument("--hurricane_position_scale_deg", type=float, default=2.0)
+    parser.add_argument("--hurricane_pressure_scale_hpa", type=float, default=10.0)
+    parser.add_argument("--hurricane_wind_scale_ms", type=float, default=5.0)
     parser.add_argument("--log_every", type=int, default=2)
     parser.add_argument("--save_latents", action="store_true")
     parser.add_argument("--plot_variables", default="t2m,u10m,q1000")
@@ -163,6 +178,23 @@ def parse_args() -> argparse.Namespace:
         parser.error("--repulsion_observation_buffer must be non-negative")
     if args.repulsion_split_beta < 0:
         parser.error("--repulsion_split_beta must be non-negative")
+    if args.hurricane_descriptor_horizon < 0:
+        parser.error("--hurricane_descriptor_horizon must be non-negative")
+    if args.hurricane_region_lat[0] >= args.hurricane_region_lat[1]:
+        parser.error("--hurricane_region_lat must be increasing")
+    if args.hurricane_region_lon[0] >= args.hurricane_region_lon[1]:
+        parser.error("--hurricane_region_lon must be increasing")
+    positive_hurricane_args = {
+        "--hurricane_pressure_temperature_hpa": args.hurricane_pressure_temperature_hpa,
+        "--hurricane_wind_temperature_ms": args.hurricane_wind_temperature_ms,
+        "--hurricane_track_radius_deg": args.hurricane_track_radius_deg,
+        "--hurricane_position_scale_deg": args.hurricane_position_scale_deg,
+        "--hurricane_pressure_scale_hpa": args.hurricane_pressure_scale_hpa,
+        "--hurricane_wind_scale_ms": args.hurricane_wind_scale_ms,
+    }
+    for name, value in positive_hurricane_args.items():
+        if value <= 0:
+            parser.error(f"{name} must be positive")
     if args.repulsion_all_frames:
         if args.repulsion_mask_mode != "frames":
             parser.error(
@@ -223,6 +255,53 @@ def main() -> None:
     channel_map = [variables.index(v) for v in obs_vars]
     print(f"observation variables ({len(obs_vars)}): channel_map -> {channel_map}")
     operator = IGRAVideoOperator(obs_frames=obs_frames, channel_map=channel_map)
+    hurricane_descriptor_config = None
+    if args.repulsion_mask_mode == "hurricane":
+        hurricane_variables = [
+            "mean_sea_level_pressure",
+            "10m_u_component_of_wind",
+            "10m_v_component_of_wind",
+        ]
+        missing_hurricane = [name for name in hurricane_variables if name not in variables]
+        if missing_hurricane:
+            raise ValueError(
+                f"Dataset is missing hurricane descriptor variables: {missing_hurricane}"
+            )
+        if dataset._weather_means is None or dataset._weather_stds is None:
+            raise ValueError(
+                "Hurricane descriptors require physical weather mean/std files"
+            )
+        hurricane_channels = [variables.index(name) for name in hurricane_variables]
+        latitude, longitude = dataset.get_lat_lon()
+        hurricane_descriptor_config = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "region_lat": list(args.hurricane_region_lat),
+            "region_lon": list(args.hurricane_region_lon),
+            "horizon": args.hurricane_descriptor_horizon,
+            "mslp_channel": hurricane_channels[0],
+            "u10_channel": hurricane_channels[1],
+            "v10_channel": hurricane_channels[2],
+            "weather_means": [
+                float(np.asarray(dataset._weather_means[index]).squeeze())
+                for index in hurricane_channels
+            ],
+            "weather_stds": [
+                float(np.asarray(dataset._weather_stds[index]).squeeze())
+                for index in hurricane_channels
+            ],
+            "pressure_temperature_hpa": args.hurricane_pressure_temperature_hpa,
+            "wind_temperature_ms": args.hurricane_wind_temperature_ms,
+            "track_radius_deg": args.hurricane_track_radius_deg,
+            "position_scale_deg": args.hurricane_position_scale_deg,
+            "pressure_scale_hpa": args.hurricane_pressure_scale_hpa,
+            "wind_scale_ms": args.hurricane_wind_scale_ms,
+        }
+        print(
+            "hurricane descriptor: "
+            f"region lat={args.hurricane_region_lat}, lon={args.hurricane_region_lon}, "
+            f"frames={args.hurricane_descriptor_horizon or 'all forecast'}"
+        )
     generator = torch.Generator(device=device).manual_seed(args.seed)
     grad_clip = args.grad_clip if args.grad_clip > 0 else None
     source_indices: list[int] = []
@@ -248,6 +327,7 @@ def main() -> None:
             gamma=args.gamma,
             grad_clip=grad_clip,
             guide_norm=args.guide_norm,
+            hurricane_descriptor_config=hurricane_descriptor_config,
         )
         sampler = PosteriorDiffusionSampler(net, conditioning)
         batch = args.num_posterior_samples
@@ -400,6 +480,17 @@ def main() -> None:
         "repulsion_observation_buffer": args.repulsion_observation_buffer,
         "repulsion_split_beta": args.repulsion_split_beta,
         "repulsion_grad_norm": args.repulsion_grad_norm,
+        "hurricane_descriptor": {
+            "region_lat": list(args.hurricane_region_lat),
+            "region_lon": list(args.hurricane_region_lon),
+            "horizon": args.hurricane_descriptor_horizon,
+            "pressure_temperature_hpa": args.hurricane_pressure_temperature_hpa,
+            "wind_temperature_ms": args.hurricane_wind_temperature_ms,
+            "track_radius_deg": args.hurricane_track_radius_deg,
+            "position_scale_deg": args.hurricane_position_scale_deg,
+            "pressure_scale_hpa": args.hurricane_pressure_scale_hpa,
+            "wind_scale_ms": args.hurricane_wind_scale_ms,
+        },
         "checkpoint": args.diffusion_checkpoint,
         "config": args.diffusion_config,
         "ae_model_path": args.ae_model_path,

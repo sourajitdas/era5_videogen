@@ -556,6 +556,7 @@ class IGRAVideoConditioning:
         gamma: float = 1e-2,
         grad_clip: float | None = 1.0,
         guide_norm: str = "none",
+        hurricane_descriptor_config: dict | None = None,
     ):
         super().__init__()
         if guide_norm not in {"none", "dsg"}:
@@ -569,6 +570,8 @@ class IGRAVideoConditioning:
         self.guide_norm = guide_norm
         self.last_repulsion_stats = None
         self._repulsion_mask_cache = {}
+        self.hurricane_descriptor_config = hurricane_descriptor_config
+        self._hurricane_tensor_cache = {}
 
     def data_loss(self, x_0_hat, measurement):
         """Differentiable station misfit (for RED-diff / hard consistency)."""
@@ -663,6 +666,232 @@ class IGRAVideoConditioning:
         self._repulsion_mask_cache[cache_key] = mask
         return mask
 
+    @staticmethod
+    def _rbf_from_flat(flat, bandwidth: float, flat_weights=None):
+        """Negative mean RBF similarity for a (particles, features) tensor."""
+        distances = []
+        for left in range(flat.shape[0]):
+            for right in range(left + 1, flat.shape[0]):
+                squared_difference = (flat[left] - flat[right]) ** 2
+                if flat_weights is None:
+                    distances.append(torch.mean(squared_difference))
+                else:
+                    distances.append(
+                        torch.sum(squared_difference * flat_weights)
+                        / flat_weights.sum().clamp_min(1e-12)
+                    )
+        pairwise_mse = torch.stack(distances)
+        if bandwidth > 0:
+            bandwidth_used = pairwise_mse.new_tensor(float(bandwidth))
+        else:
+            bandwidth_used = torch.sqrt(
+                torch.median(pairwise_mse.detach()).clamp_min(1e-12)
+            )
+        kernels = torch.exp(
+            -pairwise_mse / (2.0 * bandwidth_used.square().clamp_min(1e-12))
+        )
+        return -kernels.mean(), {
+            "pairwise_mse": float(pairwise_mse.detach().mean()),
+            "bandwidth": float(bandwidth_used.detach()),
+            "kernel": float(kernels.detach().mean()),
+        }
+
+    def _hurricane_tensors(self, decoded):
+        """Materialize static hurricane geometry/normalization on the active device."""
+        config = self.hurricane_descriptor_config
+        if config is None:
+            raise ValueError(
+                "hurricane repulsion requires hurricane_descriptor_config"
+            )
+        key = (
+            str(decoded.device),
+            str(decoded.dtype),
+            decoded.shape[-2],
+            decoded.shape[-1],
+        )
+        cached = self._hurricane_tensor_cache.get(key)
+        if cached is not None:
+            return cached
+
+        latitude = torch.as_tensor(
+            np.asarray(config["latitude"]).squeeze(),
+            device=decoded.device,
+            dtype=torch.float32,
+        )
+        longitude = torch.as_tensor(
+            np.asarray(config["longitude"]).squeeze(),
+            device=decoded.device,
+            dtype=torch.float32,
+        )
+        longitude = torch.remainder(longitude + 180.0, 360.0) - 180.0
+        if latitude.numel() != decoded.shape[-2] or longitude.numel() != decoded.shape[-1]:
+            raise ValueError(
+                "hurricane latitude/longitude dimensions do not match decoded fields"
+            )
+        lat_min, lat_max = config["region_lat"]
+        lon_min, lon_max = config["region_lon"]
+        iy = torch.nonzero(
+            (latitude >= lat_min) & (latitude <= lat_max), as_tuple=False
+        ).squeeze(-1)
+        ix = torch.nonzero(
+            (longitude >= lon_min) & (longitude <= lon_max), as_tuple=False
+        ).squeeze(-1)
+        if iy.numel() == 0 or ix.numel() == 0:
+            raise ValueError("hurricane descriptor region is outside the model grid")
+        lat_grid = latitude[iy][:, None].expand(iy.numel(), ix.numel()).reshape(-1)
+        lon_grid = longitude[ix][None, :].expand(iy.numel(), ix.numel()).reshape(-1)
+        cached = {
+            "iy": iy,
+            "ix": ix,
+            "lat_grid": lat_grid,
+            "lon_grid": lon_grid,
+        }
+        self._hurricane_tensor_cache[key] = cached
+        return cached
+
+    def _hurricane_descriptors(self, decoded):
+        """Differentiable Laura center/intensity descriptors on forecast frames."""
+        config = self.hurricane_descriptor_config
+        tensors = self._hurricane_tensors(decoded)
+        iy, ix = tensors["iy"], tensors["ix"]
+        latitude, longitude = tensors["lat_grid"], tensors["lon_grid"]
+        observed = sorted(set(getattr(self.operator, "obs_frames", ())))
+        forecast_frames = [
+            frame for frame in range(decoded.shape[2]) if frame not in observed
+        ]
+        horizon = int(config.get("horizon", 0))
+        if horizon > 0:
+            forecast_frames = forecast_frames[:horizon]
+        if not forecast_frames:
+            raise ValueError("hurricane repulsion contains no forecast frames")
+
+        first_forecast = forecast_frames[0]
+        earlier_observed = [frame for frame in observed if frame < first_forecast]
+        anchor_frame = max(earlier_observed) if earlier_observed else None
+        mslp_channel = int(config["mslp_channel"])
+        u10_channel = int(config["u10_channel"])
+        v10_channel = int(config["v10_channel"])
+        means = config["weather_means"]
+        stds = config["weather_stds"]
+        pressure_temperature = float(config["pressure_temperature_hpa"])
+        wind_temperature = float(config["wind_temperature_ms"])
+        track_radius = float(config["track_radius_deg"])
+
+        def regional_fields(frame):
+            pressure = (
+                decoded[:, mslp_channel, frame][:, iy][:, :, ix].float()
+                * float(stds[0])
+                + float(means[0])
+            ) * 0.01
+            u10 = (
+                decoded[:, u10_channel, frame][:, iy][:, :, ix].float()
+                * float(stds[1])
+                + float(means[1])
+            )
+            v10 = (
+                decoded[:, v10_channel, frame][:, iy][:, :, ix].float()
+                * float(stds[2])
+                + float(means[2])
+            )
+            return pressure.flatten(1), torch.sqrt(
+                u10.flatten(1).square() + v10.flatten(1).square() + 1e-8
+            )
+
+        def diagnose(frame, previous_center=None):
+            pressure, wind = regional_fields(frame)
+            pressure_logits = -(
+                pressure - pressure.detach().amin(dim=1, keepdim=True)
+            ) / pressure_temperature
+            if previous_center is not None:
+                previous_lat, previous_lon = previous_center
+                cos_lat = torch.cos(torch.deg2rad(previous_lat)).unsqueeze(1)
+                distance2 = (
+                    (latitude.unsqueeze(0) - previous_lat.unsqueeze(1)).square()
+                    + (
+                        (longitude.unsqueeze(0) - previous_lon.unsqueeze(1))
+                        * cos_lat
+                    ).square()
+                )
+                pressure_logits = pressure_logits - distance2 / (
+                    2.0 * track_radius**2
+                )
+            pressure_weight = torch.softmax(pressure_logits, dim=1)
+            center_lat = torch.sum(pressure_weight * latitude.unsqueeze(0), dim=1)
+            center_lon = torch.sum(pressure_weight * longitude.unsqueeze(0), dim=1)
+            central_pressure = torch.sum(pressure_weight * pressure, dim=1)
+
+            cos_lat = torch.cos(torch.deg2rad(center_lat)).unsqueeze(1)
+            distance2 = (
+                (latitude.unsqueeze(0) - center_lat.unsqueeze(1)).square()
+                + (
+                    (longitude.unsqueeze(0) - center_lon.unsqueeze(1)) * cos_lat
+                ).square()
+            )
+            wind_logits = (
+                wind - wind.detach().amax(dim=1, keepdim=True)
+            ) / wind_temperature - distance2 / (2.0 * track_radius**2)
+            wind_weight = torch.softmax(wind_logits, dim=1)
+            maximum_wind = torch.sum(wind_weight * wind, dim=1)
+            return center_lat, center_lon, central_pressure, maximum_wind
+
+        previous_center = None
+        if anchor_frame is not None:
+            anchor = diagnose(anchor_frame)
+            previous_center = (anchor[0], anchor[1])
+
+        raw = []
+        for frame in forecast_frames:
+            descriptor = diagnose(frame, previous_center=previous_center)
+            raw.append(torch.stack(descriptor, dim=-1))
+            previous_center = (descriptor[0], descriptor[1])
+        raw = torch.stack(raw, dim=1)
+        scaled = torch.stack(
+            (
+                raw[..., 0] / float(config["position_scale_deg"]),
+                raw[..., 1] / float(config["position_scale_deg"]),
+                raw[..., 2] / float(config["pressure_scale_hpa"]),
+                raw[..., 3] / float(config["wind_scale_ms"]),
+            ),
+            dim=-1,
+        )
+        return scaled, raw, forecast_frames
+
+    def _hurricane_repulsion_objective(self, decoded, bandwidth: float):
+        scaled, raw, forecast_frames = self._hurricane_descriptors(decoded)
+        objective, stats = self._rbf_from_flat(scaled.float().flatten(1), bandwidth)
+        track_distances = []
+        pressure_distances = []
+        wind_distances = []
+        for left in range(raw.shape[0]):
+            for right in range(left + 1, raw.shape[0]):
+                mean_lat = 0.5 * (raw[left, :, 0] + raw[right, :, 0])
+                dx = (raw[left, :, 1] - raw[right, :, 1]) * torch.cos(
+                    torch.deg2rad(mean_lat)
+                )
+                dy = raw[left, :, 0] - raw[right, :, 0]
+                track_distances.append(111.0 * torch.sqrt(dx.square() + dy.square()))
+                pressure_distances.append(
+                    torch.abs(raw[left, :, 2] - raw[right, :, 2])
+                )
+                wind_distances.append(torch.abs(raw[left, :, 3] - raw[right, :, 3]))
+        return objective, {
+            **stats,
+            "mask_mode": "hurricane",
+            "active_fraction": float(len(forecast_frames) / decoded.shape[2]),
+            "observation_buffer": 0,
+            "split_beta": 0.0,
+            "descriptor_frames": forecast_frames,
+            "descriptor_track_distance_km": float(
+                torch.cat(track_distances).detach().mean()
+            ),
+            "descriptor_pressure_difference_hpa": float(
+                torch.cat(pressure_distances).detach().mean()
+            ),
+            "descriptor_wind_difference_ms": float(
+                torch.cat(wind_distances).detach().mean()
+            ),
+        }
+
     def _rbf_repulsion_component(
         self,
         features,
@@ -687,32 +916,11 @@ class IGRAVideoConditioning:
                 weights = pooled_weights
         flat = features.float().flatten(1)
         flat_weights = None if weights is None else weights.float().flatten()
-        distances = []
-        for left in range(flat.shape[0]):
-            for right in range(left + 1, flat.shape[0]):
-                squared_difference = (flat[left] - flat[right]) ** 2
-                if flat_weights is None:
-                    distances.append(torch.mean(squared_difference))
-                else:
-                    distances.append(
-                        torch.sum(squared_difference * flat_weights)
-                        / flat_weights.sum().clamp_min(1e-12)
-                    )
-        pairwise_mse = torch.stack(distances)
-        if bandwidth > 0:
-            bandwidth_used = pairwise_mse.new_tensor(float(bandwidth))
-        else:
-            bandwidth_used = torch.sqrt(
-                torch.median(pairwise_mse.detach()).clamp_min(1e-12)
-            )
-        kernels = torch.exp(
-            -pairwise_mse / (2.0 * bandwidth_used.square().clamp_min(1e-12))
+        objective, stats = self._rbf_from_flat(
+            flat, bandwidth, flat_weights=flat_weights
         )
-        objective = -kernels.mean()
         return objective, {
-            "pairwise_mse": float(pairwise_mse.detach().mean()),
-            "bandwidth": float(bandwidth_used.detach()),
-            "kernel": float(kernels.detach().mean()),
+            **stats,
             "active_fraction": (
                 1.0 if weights is None else float(weights.mean().detach())
             ),
@@ -741,12 +949,15 @@ class IGRAVideoConditioning:
         """
         if decoded.shape[0] < 2:
             raise ValueError("repulsion requires at least two particles")
-        if mask_mode not in {"frames", "spatial", "split", "all"}:
+        if mask_mode not in {"frames", "spatial", "split", "hurricane", "all"}:
             raise ValueError(
-                "repulsion_mask_mode must be 'frames', 'spatial', 'split', or 'all'"
+                "repulsion_mask_mode must be 'frames', 'spatial', 'split', "
+                "'hurricane', or 'all'"
             )
         if split_beta < 0:
             raise ValueError("repulsion_split_beta must be non-negative")
+        if mask_mode == "hurricane":
+            return self._hurricane_repulsion_objective(decoded, bandwidth)
 
         observed = sorted(set(getattr(self.operator, "obs_frames", ())))
         observed = [frame for frame in observed if 0 <= frame < decoded.shape[2]]
