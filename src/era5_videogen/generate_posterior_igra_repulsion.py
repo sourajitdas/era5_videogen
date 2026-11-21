@@ -45,6 +45,10 @@ from era5_videogen.generating.conditioning_methods_repulsion import (
     IGRAVideoOperator,
 )
 from era5_videogen.generating.diffusion_repulsion import PosteriorDiffusionSampler
+from era5_videogen.observation_selection import (
+    filter_igra_measurement,
+    load_selection_manifest,
+)
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -55,6 +59,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--diffusion_checkpoint", required=True)
     parser.add_argument("--ae_model_path", required=True)
     parser.add_argument("--igra_pkl", required=True)
+    parser.add_argument(
+        "--observation_selection_manifest",
+        default=None,
+        help=(
+            "Optional JSON site-selection manifest. The sampler filters only "
+            "the real in-situ measurement; ERA5 remains evaluation-only."
+        ),
+    )
     parser.add_argument("--obs_variables", default=None)
     parser.add_argument("--igra_time_offset", type=int, default=0)
     parser.add_argument("--output_dir", default="./samples_igra_repulsion")
@@ -240,6 +252,17 @@ def main() -> None:
     print(f"Loading in-situ observations from {args.igra_pkl}")
     with open(args.igra_pkl, "rb") as handle:
         igra_data = pickle.load(handle)
+    selection_manifest = (
+        load_selection_manifest(args.observation_selection_manifest)
+        if args.observation_selection_manifest
+        else None
+    )
+    if selection_manifest is not None:
+        print(
+            "observation selection: "
+            f"{selection_manifest['_path']} "
+            f"({len(selection_manifest.get('selected_site_keys', []))} sites)"
+        )
 
     latent_shape = tuple(dataset.sample_shape)
     obs_frames = parse_obs_frames(args.obs_frames, int(dataset.source_timesteps))
@@ -305,6 +328,7 @@ def main() -> None:
     generator = torch.Generator(device=device).manual_seed(args.seed)
     grad_clip = args.grad_clip if args.grad_clip > 0 else None
     source_indices: list[int] = []
+    selection_summaries: list[dict] = []
 
     for dataset_idx in args.sample_index:
         src_idx = _source_index(dataset, dataset_idx)
@@ -315,9 +339,26 @@ def main() -> None:
         sample_dir.mkdir(parents=True, exist_ok=True)
         print(f"=== dataset index {dataset_idx}; source index {src_idx} ===")
 
-        measurement, obs_counts = _build_igra_measurement(
+        measurement, original_obs_counts = _build_igra_measurement(
             igra_data, src_idx, obs_frames, args.igra_time_offset
         )
+        obs_counts = original_obs_counts
+        if selection_manifest is not None:
+            measurement, selection_stats = filter_igra_measurement(
+                measurement,
+                selection_manifest,
+                source_index=src_idx,
+                obs_frames=obs_frames,
+            )
+            obs_counts = selection_stats["retained_records_per_frame"]
+            selection_stats = {
+                "dataset_index": int(dataset_idx),
+                "source_index": int(src_idx),
+                "original_records_per_frame": original_obs_counts,
+                **selection_stats,
+            }
+            selection_summaries.append(selection_stats)
+            print(f"  selection statistics: {selection_stats}")
         print(f"  in-situ points per observed frame: {obs_counts}")
         conditioning = IGRAVideoConditioning(
             operator=operator,
@@ -423,6 +464,7 @@ def main() -> None:
             "source_index": src_idx,
             "obs_frames": obs_frames,
             "igra_points_per_frame": obs_counts,
+            "igra_points_per_frame_before_selection": original_obs_counts,
             "sampling_seconds": sampling_seconds,
             "sampling_seconds_per_particle": sampling_seconds / batch,
             "num_particles": batch,
@@ -457,6 +499,19 @@ def main() -> None:
         "obs_variables": obs_vars,
         "igra_pkl": args.igra_pkl,
         "igra_time_offset": args.igra_time_offset,
+        "observation_selection_manifest": (
+            selection_manifest.get("_path") if selection_manifest is not None else None
+        ),
+        "observation_selection": (
+            {
+                key: value
+                for key, value in selection_manifest.items()
+                if key != "_path"
+            }
+            if selection_manifest is not None
+            else None
+        ),
+        "observation_selection_summaries": selection_summaries,
         "guidance_scale": args.guidance_scale,
         "gamma": args.gamma,
         "meas_std": args.meas_std,
