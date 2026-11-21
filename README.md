@@ -13,6 +13,21 @@ latent; a 525M-parameter DiT3D flow-matching model (TrigFlow) is trained on the
 latents. Assimilation is posterior sampling with guidance differentiated
 through the frozen decoder. A single 40 GB GPU runs every sampling task.
 
+## Oracle-informed repulsion sampling
+
+This branch adds retrospective oracle-informed radiosonde selection and
+repulsion-guided posterior sampling for studying diverse and extreme Hurricane
+Laura trajectories.
+
+The workflow uses the realized ERA5 trajectory only during the retrospective
+observation-selection stage. Future ERA5 is not supplied to the final
+posterior sampler.
+
+For the method description, portable Python commands, NERSC/Slurm workflow,
+and interpretation guidance, see:
+
+[Oracle-informed observation selection with repulsion-guided sampling](docs/oracle_repulsion_sampling.md)
+
 ## Quick start
 
 Download the trained checkpoints and demo data (one test window,
